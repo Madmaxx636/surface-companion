@@ -22,7 +22,7 @@ One app to control, fix and keep up to date a Microsoft Surface running Linux. I
 | Power & sleep | Sleep mode (modern standby or deep), lid action, lid wake, charge limit, battery health, sleep/hibernate now |
 | Touch & pen | Detect touchscreen and pen, restart `iptsd`, install touch support |
 | Cameras | Which camera hardware you have, whether drivers, firmware and libcamera are in place, install camera support, and (behind a warning) community camera drivers |
-| Surface Book | Detach the screen, see tablet/laptop/studio mode, discrete GPU power |
+| Surface Book | Detach the screen, see tablet/laptop/studio mode, discrete GPU power, install NVIDIA's driver (DKMS, with a Secure Boot terminal route) |
 | Fixes | Known workarounds from the linux-surface wiki, only the ones that apply to your model, each undoable |
 | Software & updates | Add the linux-surface repository, install the kernel and drivers, check for and apply updates |
 

@@ -1,2 +1,2 @@
 """Surface Companion: control and fix Surface hardware on Linux."""
-__version__ = "0.2.0"
+__version__ = "0.2.1"

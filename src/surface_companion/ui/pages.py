@@ -567,6 +567,9 @@ class BookPage(Page):
         self.gpu.add(Row("Keep the GPU powered", "Off lets it sleep when idle, which saves battery. Turn on "
                          "if a game or compute job stutters.", self.gpu_on))
         self.gpu_on.clicked.connect(lambda on: self.act("set_dgpu_power", {"dgpu_always_on": on}))
+        self.nv_btn = button("Install NVIDIA driver…", "primary", lambda: self.win.install_nvidia())
+        self.nv_row = Row("NVIDIA driver", "", self.nv_btn)
+        self.gpu.add(self.nv_row)
         self.body.addWidget(self.gpu)
 
     def detach(self):
@@ -591,6 +594,11 @@ class BookPage(Page):
             self.gpu_text.setText(f"{g.get('driver') or 'No driver'} · power state {g.get('power_state') or '?'} "
                                   f"({g.get('runtime_status') or '?'})")
             self.gpu_on.set_silently(g.get("power_control") == "on")
+            drv = g.get("driver")
+            self.nv_row.setVisible(drv != "nvidia")
+            self.nv_row.set_desc("Using the open 'nouveau' driver: fine for the desktop, slow for games and no CUDA. "
+                                 "NVIDIA's own driver gives full speed." if drv == "nouveau" else
+                                 "No driver is loaded for the GPU yet." if not drv else f"Using the {drv} driver.")
 
 
 # ------------------------------------------------------------------------------------------ touch & pen
@@ -961,6 +969,13 @@ class SoftwarePage(Page):
             else:
                 ctl = Pill("Unavailable", "muted")
             self.comp_rows.addWidget(Row(c["title"], c["why"] if c["installable"] or not c["reason"] else c["reason"], ctl))
+        nv = d.get("nvidia") or {}
+        if nv.get("present"):
+            drv = nv.get("loaded")
+            ctl = Pill("Installed", "good") if drv == "nvidia" else button("Install…", "primary", self.win.install_nvidia)
+            self.comp_rows.addWidget(Row("NVIDIA graphics driver",
+                                         "NVIDIA's own driver for the discrete GPU: full speed and CUDA. "
+                                         + ("Currently using the open 'nouveau' driver." if drv == "nouveau" else ""), ctl))
         row = QHBoxLayout()
         wrap = QWidget()
         wrap.setLayout(row)

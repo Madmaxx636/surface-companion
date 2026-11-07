@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1
+
+- NVIDIA graphics driver install for devices with a discrete NVIDIA GPU (Surface Book, Laptop Studio), on the Software
+  page and the Surface Book page. It uses only distribution packages and the DKMS build, because linux-surface is a
+  custom kernel: Ubuntu (driver recommended by `ubuntu-drivers` plus its `nvidia-dkms` package), Debian
+  (`nvidia-driver`, needs non-free enabled), Arch (`nvidia-dkms`). Fedora is explained, not automated, since it needs the
+  third-party RPM Fusion repository. With Secure Boot on, the install opens in a terminal so you can answer the key
+  prompts. It shows the commands and notes first. Untested on real NVIDIA hardware.
+
 ## 0.2.0
 
 - First-run setup: scans the device step by step (device, system, kernel, touch/pen/camera, fixes, updates), shows

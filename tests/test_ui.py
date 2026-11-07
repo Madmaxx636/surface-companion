@@ -181,3 +181,25 @@ def test_wizard_scan_runs_all_steps_with_local_backend(root, monkeypatch):
     w.tray = None
     w.timer.stop()
     w.close()
+
+
+def test_book_page_offers_nvidia_install_only_when_driver_is_not_nvidia(root, monkeypatch):
+    from surface_companion.ui import prefs
+    monkeypatch.setattr(prefs, "get", lambda k, d=None: d)
+    monkeypatch.setattr(prefs, "put", lambda k, v: None)
+    from surface_companion.ui.backend import Backend
+    from surface_companion.ui.main import MainWindow
+    app = _app()
+    w = MainWindow(Backend(session_bus=True))
+    w.show()
+    page = w.pages["book"]
+    st = {"book": {"dtx": False, "dgpu": {"driver": "nouveau", "power_state": "D3cold", "runtime_status": "suspended",
+                                         "power_control": "auto"}}}
+    page.update_state(st)
+    assert not page.nv_row.isHidden() and "nouveau" in page.nv_row.desc.text()
+    st["book"]["dgpu"]["driver"] = "nvidia"
+    page.update_state(st)
+    assert page.nv_row.isHidden()
+    w.tray = None
+    w.timer.stop()
+    w.close()

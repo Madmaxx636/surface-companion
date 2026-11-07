@@ -9,7 +9,10 @@ from PyQt6.QtWidgets import (QMenu as _QMenu, QButtonGroup, QFrame, QHBoxLayout,
 
 from . import icons, prefs, theme
 from .backend import Backend
-from .dialogs import JobDialog, confirm, confirm_risk
+import subprocess
+
+from ..pkg import community, nvidia as nvidia_mod
+from .dialogs import JobDialog, confirm, confirm_risk, notify
 from .welcome import Tour, WelcomeWizard
 from .pages import (BookPage, CameraPage, DisplayPage, FixesPage, OverviewPage, PenPage, PerformancePage,
                     PowerPage, SoftwarePage)
@@ -331,6 +334,32 @@ class MainWindow(QMainWindow):
                 self.run_job("Installing", "install", {"ids": ids, "accept_unsupported": unsupported},
                              lambda ok, m: self.backend.call("get_software", ok=self._software_and_page))
         self.backend.call("plan_install", {"ids": ids}, ok=got, err=self.toast)
+
+    def install_nvidia(self):
+        """Plan the NVIDIA driver install, show it, then run it (in a terminal when Secure Boot needs prompts)."""
+        def got(info):
+            pl = info["plan"]
+            if pl["blockers"]:
+                confirm(self, "NVIDIA driver", "\n".join(pl["blockers"]), "", "OK")
+                return
+            detail = "\n".join(f"• {s['title']}\n    {s['describe']}" for s in pl["steps"])
+            detail += "\n\n" + "\n".join(pl["notes"]) + "\n\nThings to know:\n" + "\n".join("• " + r for r in pl["risks"])
+            where = ("It will open a terminal, because Secure Boot needs you to answer prompts."
+                     if pl["interactive"] else "You'll be asked for your administrator password.")
+            if not confirm(self, "Install the NVIDIA driver?",
+                           "This installs NVIDIA's own graphics driver for the discrete GPU.", detail + "\n\n" + where,
+                           "Install"):
+                return
+            if pl["interactive"]:
+                cmd = community.terminal_command(["bash", "-c", nvidia_mod.terminal_script(pl["steps"])])
+                if not cmd:
+                    notify(self, "No terminal found", "Open a terminal and run:\n\n" + nvidia_mod.terminal_script(pl["steps"]))
+                    return
+                subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.toast("Opened a terminal. Restart when it says it has finished, then complete the key screen.")
+            else:
+                self.run_job("Installing NVIDIA driver", "install_nvidia", {}, lambda ok, m: self.refresh())
+        self.backend.call("get_nvidia", ok=got, err=self.toast)
 
     def _software_and_page(self, d):
         self._got_software(d)

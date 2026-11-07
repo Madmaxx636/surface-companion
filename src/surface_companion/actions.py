@@ -17,7 +17,7 @@ from typing import Callable
 from . import device, fixes, sysfs
 from .fixes.base import Ctx
 from .hw import battery, book, camera, clocks, display, pen, perf, sleep, thermal
-from .pkg import community, distro as dist, planner
+from .pkg import community, distro as dist, nvidia, planner
 
 POLKIT_READ = ""                                   # no authorisation needed
 POLKIT_CONTROL = "org.surfacecompanion.control"
@@ -227,6 +227,17 @@ def build(settings: Settings) -> dict[str, Action]:
                         "installed": community.installed(drv)})
         return out
 
+    def install_nvidia(a, log):
+        pl = nvidia.plan(get_device(), get_distro())
+        if pl["blockers"]:
+            raise RuntimeError(" ".join(pl["blockers"]))
+        if pl["interactive"]:
+            raise RuntimeError("Secure Boot is on, so this has to run in a terminal where you can answer the key prompts.")
+        steps = [planner.Step(s["title"], s["kind"], argv=s["argv"]) for s in pl["steps"]]
+        if not planner.run_plan(planner.Plan(steps=steps), log):
+            raise RuntimeError("Installing the NVIDIA driver did not complete")
+        return "Installed. Restart to start using the NVIDIA driver."
+
     def check_updates(a, log):
         log("Checking for updates...")
         return json.dumps(planner.check_updates(get_distro()))
@@ -249,8 +260,10 @@ def build(settings: Settings) -> dict[str, Action]:
             "distro": get_distro().to_dict(),
             "system": planner.system_status(get_device(), get_distro()),
             "assessment": planner.assess(get_device(), get_distro()),
+            "nvidia": nvidia.info(),
             "components": planner.component_status(get_device(), get_distro())}),
         "get_community": Action(POLKIT_READ, get_community),
+        "get_nvidia": Action(POLKIT_READ, lambda a: {**nvidia.info(), "plan": nvidia.plan(get_device(), get_distro())}),
         "get_kernel": Action(POLKIT_READ, lambda a: planner.kernel_status(get_device(), get_distro())),
         "plan_install": Action(POLKIT_READ, lambda a: planner.plan_install(a["ids"], get_device(), get_distro()).to_dict()),
         # hardware controls
@@ -270,6 +283,7 @@ def build(settings: Settings) -> dict[str, Action]:
         "revert_fix": Action(POLKIT_ADMIN, revert_fix, job=True),
         "install": Action(POLKIT_ADMIN, do_install, job=True),
         "setup_repo": Action(POLKIT_ADMIN, setup_repo, job=True),
+        "install_nvidia": Action(POLKIT_ADMIN, install_nvidia, job=True),
         "install_community": Action(POLKIT_ADMIN, install_community, job=True),
         "remove_community": Action(POLKIT_ADMIN, remove_community, job=True),
         "check_updates": Action(POLKIT_READ, check_updates, job=True),

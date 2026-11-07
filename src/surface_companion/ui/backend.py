@@ -35,7 +35,10 @@ class _Task(QRunnable):
             if os.environ.get("SC_DEBUG"):
                 traceback.print_exc()
             res, ok = str(e) or e.__class__.__name__, False
-        self.disp.done.emit(self.tid, ok, res)
+        try:
+            self.disp.done.emit(self.tid, ok, res)
+        except RuntimeError:
+            pass                  # the window was closed while this was running; nobody is waiting for the result
 
 
 class Backend(QObject):
