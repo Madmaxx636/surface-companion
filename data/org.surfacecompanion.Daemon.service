@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.surfacecompanion.Daemon
+Exec=/bin/false
+User=root
+SystemdService=surface-companion.service

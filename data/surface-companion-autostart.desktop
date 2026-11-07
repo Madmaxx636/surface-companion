@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Surface Companion (tray)
+Exec=surface-companion --hidden
+Icon=surface-companion
+X-GNOME-Autostart-enabled=true
+NoDisplay=true

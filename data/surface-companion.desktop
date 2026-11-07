@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Surface Companion
+GenericName=Surface hardware control
+Comment=Control and fix Microsoft Surface hardware on Linux
+Exec=surface-companion
+Icon=surface-companion
+Terminal=false
+Categories=System;Settings;HardwareSettings;
+Keywords=surface;brightness;performance;battery;pen;touch;camera;
+StartupNotify=true

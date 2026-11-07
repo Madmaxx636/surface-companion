@@ -1,0 +1,14 @@
+[Unit]
+Description=Surface Companion hardware service
+Documentation=https://github.com/linux-surface/linux-surface
+After=dbus.service polkit.service
+
+[Service]
+Type=dbus
+BusName=org.surfacecompanion.Daemon
+ExecStart=/usr/bin/surface-companiond
+Restart=on-failure
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
