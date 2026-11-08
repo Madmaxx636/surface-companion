@@ -490,6 +490,9 @@ def tour_steps(win) -> list[dict]:
                  "drivers, behind a clear warning."},
         {"target": "fixes", "title": "Fixes",
          "text": "Known workarounds from the linux-surface project, filtered to your model. Every fix can be undone."},
+        {"target": "test", "title": "System test",
+         "text": "Check that everything works: automatic health checks, plus hands-on tests for the keyboard, mouse, "
+                 "speakers, ports, camera and detach. Copy the report for a bug report."},
         {"target": "software", "title": "Software and updates",
          "text": "Install and update the Surface kernel and drivers. New releases show up here."},
         {"target": "@mode", "title": "Simple or Advanced",

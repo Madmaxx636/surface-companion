@@ -85,7 +85,12 @@ def _battery(p):
     p.drawLine(QPointF(21, 10), QPointF(21, 14))
 
 
-DRAW = {"home": _home, "display": _sun, "performance": _gauge, "sleep": _moon, "pen": _pen,
+def _test(p):
+    p.drawEllipse(QPointF(12, 12), 9, 9)
+    p.drawPolyline([QPointF(7.5, 12.5), QPointF(10.5, 15.5), QPointF(16.5, 9)])
+
+
+DRAW = {"test": _test, "home": _home, "display": _sun, "performance": _gauge, "sleep": _moon, "pen": _pen,
         "camera": _camera, "book": _book, "fixes": _wrench, "software": _box, "battery": _battery}
 
 

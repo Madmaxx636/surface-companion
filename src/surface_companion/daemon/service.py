@@ -128,7 +128,7 @@ class Daemon:
 
         def bus_acquired(conn, name):
             self.conn = conn
-            conn.register_object(PATH, info, self.on_call, lambda *a: GLib.Variant("s", "0.2.2"), None)
+            conn.register_object(PATH, info, self.on_call, lambda *a: GLib.Variant("s", "0.3.0"), None)
             if self.bus_type == Gio.BusType.SYSTEM:
                 conn.signal_subscribe("org.freedesktop.login1", "org.freedesktop.login1.Manager", "PrepareForSleep",
                                       "/org/freedesktop/login1", None, Gio.DBusSignalFlags.NONE, self.on_login1)

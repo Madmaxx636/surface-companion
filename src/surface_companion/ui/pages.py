@@ -13,6 +13,7 @@ from ..device import Device
 from ..pkg import community, distro as dist
 from .dialogs import JobDialog, confirm, confirm_risk, notify
 from . import prefs
+from .. import handson as hands
 from .widgets import (Banner, Card, ChoiceGroup, Pill, Row, SliderRow, Sparkline, Toggle, button, label, separator)
 
 
@@ -1005,6 +1006,241 @@ class FixesPage(Page):
     def revert(self, f):
         if confirm(self, f["title"], "Undo this fix?", "", "Undo"):
             self._run(f, "revert_fix")
+
+
+# ------------------------------------------------------------------------------------------ system test
+
+STATUS_PILL = {"ok": ("Pass", "good"), "warn": ("Warning", "warn"), "fail": ("Fail", "bad"), "skip": ("Skipped", "muted")}
+
+
+class TestPage(Page):
+    key, title = "test", "System test"
+    subtitle = "Check that your Surface works: automatic checks, plus hands-on tests for the parts you touch."
+
+    def build(self):
+        from .. import systemtest
+        self.systemtest = systemtest
+        self.results: dict[str, dict] = {}
+        self.hands_results: dict[str, dict] = {}
+        self.stress_result: dict | None = None
+        self.running = False
+
+        bar = QHBoxLayout()
+        self.run_btn = button("Run health check", "primary", self.run_all)
+        self.copy_btn = button("Copy report", on_click=self.copy_report)
+        self.save_btn = button("Save report…", on_click=self.save_report)
+        for b in (self.run_btn, self.copy_btn, self.save_btn):
+            bar.addWidget(b)
+        bar.addStretch(1)
+        self.body.addLayout(bar)
+
+        self.summary = Card()
+        self.summary_text = label("Not run yet. The health check only reads your system; it changes nothing.", "muted")
+        self.summary.add(self.summary_text)
+        self.body.addWidget(self.summary)
+
+        self.checks_card = Card("Health check")
+        self.rows = QVBoxLayout()
+        self.checks_card.add_layout(self.rows)
+        self.body.addWidget(self.checks_card)
+        self.row_widgets: dict[str, Row] = {}
+
+        self.hands_card = Card("Hands-on tests", "These need you: press, plug, listen, look. Nothing is changed.")
+        self.hands_rows: dict[str, tuple[Row, QWidget]] = {}
+        self.body.addWidget(self.hands_card)
+
+        self.stress_card = self.adv(Card("Stress test",
+                                         "Loads every CPU core for a short time and watches temperature, clock speed, fan "
+                                         "and throttling. It stops by itself above 95 °C. Plug in the charger first."))
+        self.stress_len = QComboBox()
+        for sec in (30, 60, 120):
+            self.stress_len.addItem(f"{sec} seconds", sec)
+        self.stress_text = label("", "muted")
+        srow = QHBoxLayout()
+        srow.addWidget(self.stress_len)
+        srow.addWidget(button("Start stress test", on_click=self.run_stress))
+        srow.addStretch(1)
+        self.stress_card.add_layout(srow)
+        self.stress_card.add(self.stress_text)
+        self.body.addWidget(self.stress_card)
+
+    # ---- hands-on rows are built once we know the device (Book vs Pro etc.)
+    def _build_hands(self, family: str):
+        if self.hands_rows:
+            return
+        tests = [("keyboard", "Keyboard", "Press every key.", self._kb),
+                 ("pointer", "Mouse, touchpad and touch", "Move, click, scroll, touch.", self._pointer),
+                 ("speakers", "Speakers", "Play a tone on each side.", self._speakers),
+                 ("ports", "Ports", "Plug something into each port and watch it appear.", self._ports),
+                 ("camera", "Camera", "Take a test photo.", self._camera)]
+        if hands.detach_capable(family):
+            tests.append(("detach", "Screen detach" if family == "book" else "Detachable keyboard",
+                          "Watches the detach latch and keyboard while you detach and attach it." if family == "book"
+                          else "Detach the keyboard cover and attach it again.", self._detach))
+        for tid, name, desc, fn in tests:
+            holder = QWidget()
+            hl = QHBoxLayout(holder)
+            hl.setContentsMargins(0, 0, 0, 0)
+            pill = Pill("Not run", "muted")
+            hl.addWidget(pill)
+            hl.addWidget(button("Start", on_click=lambda f=fn, t=tid, n=name: self._run_hands(f, t, n)))
+            row = Row(name, desc, holder)
+            self.hands_card.add(row)
+            self.hands_rows[tid] = (row, pill)
+
+    def _run_hands(self, factory, tid, name):
+        dlg = factory()
+        dlg.exec()
+        out = dlg.outcome or "skip"
+        status = {"ok": "ok", "fail": "fail", "skip": "skip"}[out]
+        self.hands_results[tid] = {"id": "hw-" + tid, "title": name, "status": status,
+                                   "detail": dlg.note if out != "skip" else "skipped", "hint": "", "goto": None}
+        pill = self.hands_rows[tid][1]
+        text, tone = STATUS_PILL[status]
+        pill.set(text, tone)
+
+    def _kb(self):
+        from .handson import KeyboardTest
+        return KeyboardTest(self)
+
+    def _pointer(self):
+        from .handson import PointerTest
+        return PointerTest(self)
+
+    def _speakers(self):
+        from .handson import SpeakerTest
+        return SpeakerTest(self)
+
+    def _ports(self):
+        from .handson import PortsTest
+        return PortsTest(self)
+
+    def _camera(self):
+        from .handson import CameraTest
+        return CameraTest(self, self.b.run_local)
+
+    def _detach(self):
+        from .handson import DetachTest
+        fam = (self.win.state or {}).get("device", {}).get("family", "")
+        return DetachTest(self, fam)
+
+    def update_state(self, st):
+        self._build_hands(st["device"]["family"])
+
+    def on_show(self):
+        if self.win.state:
+            self._build_hands(self.win.state["device"]["family"])
+
+    # ---- health check
+    def run_all(self):
+        if self.running:
+            return
+        self.running = True
+        self.run_btn.setEnabled(False)
+        self.results = {}
+        while self.rows.count():
+            w = self.rows.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        self.row_widgets = {}
+        self.summary_text.setText("Running...")
+        for cid, title in self.systemtest.TITLES.items():
+            row = Row(title, "", Pill("…", "muted"))
+            self.rows.addWidget(row)
+            self.row_widgets[cid] = row
+        ids = list(self.systemtest.TITLES)
+        self._next_check(ids, 0)
+
+    def _next_check(self, ids, i):
+        if i >= len(ids):
+            self._finish()
+            return
+
+        def got(res):
+            self._show(res)
+            self._next_check(ids, i + 1)
+
+        def failed(msg):
+            self._show({"id": ids[i], "title": self.systemtest.TITLES[ids[i]], "status": "skip",
+                        "detail": msg, "hint": "", "goto": None})
+            self._next_check(ids, i + 1)
+        self.b.call("run_test", {"id": ids[i]}, ok=got, err=failed)
+
+    def _show(self, res):
+        self.results[res["id"]] = res
+        row = self.row_widgets.get(res["id"])
+        if not row:
+            return
+        text, tone = STATUS_PILL[res["status"]]
+        pill = row.control
+        pill.set(text, tone)
+        desc = res["detail"] + (f"\n→ {res['hint']}" if res["hint"] and res["status"] in ("warn", "fail") else "")
+        row.set_desc(desc)
+
+    def _finish(self):
+        self.running = False
+        self.run_btn.setEnabled(True)
+        self.run_btn.setText("Run again")
+        s = self.systemtest.summarize(list(self.results.values()))
+        c = s["counts"]
+        verdict = {"ok": "Everything checked out.", "warn": "Mostly fine, with some things to look at.",
+                   "fail": "Something needs attention."}[s["verdict"]]
+        self.summary_text.setText(f"{verdict}  {c['ok']} passed · {c['warn']} warnings · {c['fail']} failed · "
+                                  f"{c['skip']} skipped")
+        self.summary_text.setObjectName("")
+        self.summary_text.setStyleSheet("")
+
+    # ---- stress
+    def run_stress(self):
+        secs = self.stress_len.currentData()
+        if not confirm(self, "Run the stress test?",
+                       f"This pushes every CPU core to 100% for {secs} seconds. The fan will spin up and the device "
+                       "will get warm. It stops by itself above 95 °C.",
+                       "Plug in the charger first. Save your work, since the device may feel sluggish while it runs.",
+                       "Start"):
+            return
+
+        def done(ok, msg):
+            if not ok:
+                self.stress_text.setText("Couldn't run: " + msg)
+                return
+            import json as _json
+            self.stress_result = _json.loads(msg)
+            r = self.stress_result
+            self.stress_text.setText(f"{STATUS_PILL[r['status']][0]}: {r['summary']}")
+        self.win.run_job("Stress test", "stress_test", {"seconds": secs}, done)
+
+    # ---- report
+    def _all_results(self) -> list[dict]:
+        order = list(self.systemtest.TITLES)
+        out = [self.results[i] for i in order if i in self.results]
+        out += list(self.hands_results.values())
+        return out
+
+    def report(self) -> str:
+        d = (self.win.state or {}).get("device", {})
+        dev = {"model": d.get("model", "?"), "kernel": d.get("kernel", "?"), "distro": self.win.distro_name}
+        stress = ({"summary": self.stress_result["summary"]} if self.stress_result else None)
+        return self.systemtest.report_text(self._all_results(), dev, stress)
+
+    def copy_report(self):
+        from PyQt6.QtWidgets import QApplication
+        if not self._all_results():
+            self.win.toast("Run the health check or a hands-on test first.")
+            return
+        QApplication.clipboard().setText(self.report())
+        self.win.toast("Report copied. Paste it into a bug report or message.")
+
+    def save_report(self):
+        from PyQt6.QtWidgets import QFileDialog
+        if not self._all_results():
+            self.win.toast("Run the health check or a hands-on test first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save report", str(Path.home() / "surface-system-test.txt"),
+                                              "Text files (*.txt)")
+        if path:
+            Path(path).write_text(self.report())
+            self.win.toast(f"Saved to {path}")
 
 
 # ------------------------------------------------------------------------------------------ software

@@ -24,6 +24,7 @@ One app to control, fix and keep up to date a Microsoft Surface running Linux. I
 | Cameras | Which camera hardware you have, whether drivers, firmware and libcamera are in place, install camera support, and (behind a warning) community camera drivers |
 | Surface Book | Detach the screen, see tablet/laptop/studio mode, discrete GPU power, install NVIDIA's driver (DKMS, with a Secure Boot terminal route) |
 | Fixes | Known workarounds from the linux-surface wiki, only the ones that apply to your model, each undoable |
+| System test | 18 read-only health checks, hands-on tests (keyboard, mouse/touchpad/touch, speakers, ports, camera, Surface Book detach or Type Cover), a CPU stress test with a heat cut-off, and a copyable report |
 | Software & updates | Add the linux-surface repository, install the kernel and drivers, check for and apply updates |
 
 A tray icon gives one-click performance profile switching.

@@ -15,7 +15,7 @@ from ..pkg import community, nvidia as nvidia_mod
 from .dialogs import JobDialog, confirm, confirm_risk, notify
 from .welcome import Tour, WelcomeWizard
 from .pages import (BookPage, CameraPage, DisplayPage, FixesPage, OverviewPage, PenPage, PerformancePage,
-                    PowerPage, SoftwarePage)
+                    PowerPage, SoftwarePage, TestPage)
 from .widgets import label
 
 POLL_MS = 2500
@@ -61,7 +61,8 @@ class MainWindow(QMainWindow):
         specs = [("overview", "home", OverviewPage), ("display", "display", DisplayPage),
                  ("performance", "performance", PerformancePage), ("sleep", "sleep", PowerPage),
                  ("book", "book", BookPage), ("pen", "pen", PenPage), ("camera", "camera", CameraPage),
-                 ("fixes", "fixes", FixesPage), ("software", "software", SoftwarePage)]
+                 ("fixes", "fixes", FixesPage), ("test", "test", TestPage),
+                 ("software", "software", SoftwarePage)]
         self.icon_names = {}
         for key, icon, cls in specs:
             page = cls(self)

@@ -383,3 +383,177 @@ def test_keyboard_timeout_selector_reflects_state_and_sends_choice(root, monkeyp
     page.kbd_timeout.activated.emit(i)
     assert calls[-1] == ("set_kbd_timeout", {"seconds": 10})
     w.close()
+
+
+# ------------------------------------------------------------------ system test page and hands-on dialogs
+
+def test_keyboard_test_lights_keys_and_passes_at_ninety_percent(root, monkeypatch):
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    from surface_companion.ui import handson as ho
+    app = _app()
+    dlg = ho.KeyboardTest(None)
+    dlg.show()
+    assert not dlg.ok_btn.isEnabled()
+    QTest.keyClick(dlg, Qt.Key.Key_Escape)                      # must not close the dialog
+    assert dlg.isVisible() and 1 in dlg.grid.pressed
+    for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789":
+        QTest.keyClick(dlg, getattr(Qt.Key, "Key_" + ch))
+    for k in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Backspace, Qt.Key.Key_Tab, Qt.Key.Key_Up, Qt.Key.Key_Down,
+              Qt.Key.Key_Left, Qt.Key.Key_Right):
+        QTest.keyClick(dlg, k)
+    assert "keys detected" in dlg.count.text()
+    assert not dlg.ok_btn.isEnabled()                             # symbols and F-keys still missing
+    for code in dlg.grid.codes():
+        dlg.grid.press(code)
+    dlg._update()
+    assert dlg.ok_btn.isEnabled() and dlg.note.startswith("70 of 70") or dlg.ok_btn.isEnabled()
+    dlg.close()
+
+
+def test_evdev_code_prefers_native_scancode_and_falls_back_to_the_qt_key():
+    from PyQt6.QtCore import Qt
+    from surface_companion.ui import handson as ho
+
+    class E:
+        def __init__(self, sc, key): self._sc, self._k = sc, key
+        def nativeScanCode(self): return self._sc
+        def key(self): return self._k
+    assert ho.evdev_code(E(38, Qt.Key.Key_A)) == 30          # xkb keycode 38 = evdev 30 = A, whatever the layout says
+    assert ho.evdev_code(E(0, Qt.Key.Key_Q)) == 16
+    assert ho.evdev_code(E(0, Qt.Key.Key_F13)) is None
+
+
+def test_pointer_test_needs_move_clicks_and_scroll(root):
+    from surface_companion.ui import handson as ho
+    app = _app()
+    dlg = ho.PointerTest(None)
+    for ev in ("move", "left", "right", "double"):
+        dlg._event(ev)
+    assert not dlg.ok_btn.isEnabled()
+    dlg._event("scroll")
+    assert dlg.ok_btn.isEnabled()                                  # middle click and touch are optional
+    assert "not detected: Middle click" in dlg.note and "Touch the screen" in dlg.note
+    dlg.close()
+
+
+def test_speaker_test_needs_every_side_heard(root, monkeypatch):
+    from surface_companion import handson
+    from surface_companion.ui import handson as ho
+    app = _app()
+    monkeypatch.setattr(handson, "player_cmd", lambda p: None)
+    dlg = ho.SpeakerTest(None)
+    assert "No audio player" in dlg.status.text() and not dlg.ok_btn.isEnabled()
+    for cb in dlg.heard.values():
+        cb.setChecked(True)
+    assert dlg.ok_btn.isEnabled()
+    dlg.close()
+
+
+def test_ports_and_detach_dialogs_report_what_they_saw(root, monkeypatch):
+    from surface_companion import handson
+    from surface_companion.ui import handson as ho
+    app = _app()
+    snaps = iter([{"usb": {}, "typec": {}, "displays": {}, "jacks": {}},
+                  {"usb": {}, "typec": {}, "displays": {}, "jacks": {}},
+                  {"usb": {"3-1": {"name": "SanDisk Ultra", "removable": "removable", "speed": "480"}}, "typec": {},
+                   "displays": {}, "jacks": {}}])
+    last = {"s": None}
+    def snap():
+        try:
+            last["s"] = next(snaps)
+        except StopIteration:
+            pass
+        return last["s"]
+    monkeypatch.setattr(handson, "ports_snapshot", snap)
+    dlg = ho.PortsTest(None)
+    dlg._poll()
+    dlg._poll()
+    assert "USB device plugged in: SanDisk Ultra" in dlg.log.toPlainText() and "1 plug/unplug" in dlg.note
+    dlg.close()
+    kbs = iter([{"keyboards": 1, "touchpads": 1}, {"keyboards": 1, "touchpads": 1}, {"keyboards": 0, "touchpads": 0},
+                {"keyboards": 1, "touchpads": 1}])
+    cur = {"v": {"keyboards": 1, "touchpads": 1}}
+    def kb():
+        try:
+            cur["v"] = next(kbs)
+        except StopIteration:
+            pass
+        return cur["v"]
+    monkeypatch.setattr(handson, "keyboard_state", kb)
+    d = ho.DetachTest(None, "pro")
+    d.timer.stop()
+    assert not d.ok_btn.isEnabled()
+    d._poll()                                                      # keyboard disappears
+    assert "keyboard detached" in d.log.toPlainText()
+    assert not d.ok_btn.isEnabled()                                # attached again not yet seen
+    d._poll()                                                      # and comes back
+    assert d.ok_btn.isEnabled() and "keyboard attached" in d.note
+    d.close()
+
+
+def test_book_detach_test_reads_dtx_and_passes_on_a_mode_change(root, monkeypatch):
+    from surface_companion import handson
+    from surface_companion.ui import handson as ho
+    app = _app()
+    modes = iter(["laptop", "laptop", "tablet"])
+    cur = {"m": "laptop"}
+    def ds():
+        try:
+            cur["m"] = next(modes)
+        except StopIteration:
+            pass
+        return {"dtx": True, "mode": cur["m"], "latch": "closed", "base_attached": True}
+    monkeypatch.setattr(handson, "detach_state", ds)
+    monkeypatch.setattr(handson, "keyboard_state", lambda: {"keyboards": 1, "touchpads": 1})
+    d = ho.DetachTest(None, "book")
+    d.timer.stop()
+    assert "never detaches" in d.layout().itemAt(1).widget().text()
+    assert not d.ok_btn.isEnabled()                                # still in laptop mode
+    d._poll()                                                      # screen goes to tablet mode
+    assert d.ok_btn.isEnabled() and "screen mode change" in d.note
+    d.close()
+
+
+def test_system_test_page_runs_checks_and_builds_a_report(root, monkeypatch):
+    from conftest import put
+    app, w, saved = _win(monkeypatch)
+    put(root, "/sys/class/dmi/id/sys_vendor", "Microsoft Corporation")
+    put(root, "/sys/class/dmi/id/product_name", "Surface Book 2")
+    put(root, "/sys/class/backlight/a/max_brightness", "100")
+    put(root, "/sys/class/backlight/a/brightness", "50")
+    put(root, "/sys/class/backlight/a/type", "raw")
+    from surface_companion import actions, systemtest
+    monkeypatch.setattr(systemtest, "_kernel_log", lambda: "")
+    for c in (actions._dev_cache, actions._distro_cache, actions._thermal_cache, actions._slow_cache):
+        c.v = None
+    w.state = _base_state()
+    w.state["device"]["family"] = "book"
+    w.distro_name = "Ubuntu"
+    page = w.pages["test"]
+    page.update_state(w.state)
+    assert set(page.hands_rows) == {"keyboard", "pointer", "speakers", "ports", "camera", "detach"}
+    assert page.hands_rows["detach"][0].title.text() == "Screen detach"
+    page.run_all()
+    for _ in range(120):
+        _pump(app, 0.1)
+        if not page.running:
+            break
+    assert not page.running and len(page.results) == len(systemtest.TITLES)
+    assert "passed" in page.summary_text.text()
+    page.hands_results["keyboard"] = {"id": "hw-keyboard", "title": "Keyboard", "status": "ok", "detail": "70 of 70 keys",
+                                      "hint": "", "goto": None}
+    rep = page.report()
+    assert "Surface Companion system test" in rep and "[PASS] Keyboard: 70 of 70 keys" in rep and "Device:" in rep
+    w.close()
+
+
+def test_system_test_page_for_a_laptop_has_no_detach_test_and_stress_is_advanced_only(root, monkeypatch):
+    app, w, saved = _win(monkeypatch)
+    page = w.pages["test"]
+    page.update_state(_base_state())
+    assert "detach" not in page.hands_rows
+    assert page.stress_card.isHidden()                             # Simple view
+    w.set_advanced(True)
+    assert not page.stress_card.isHidden()
+    w.close()

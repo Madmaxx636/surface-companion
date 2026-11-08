@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import automation, device, fixes, sysfs
+from . import automation, device, fixes, stress, sysfs, systemtest
 from .fixes.base import Ctx
 from .hw import battery, book, camera, clocks, display, pen, perf, sleep, thermal
 from .pkg import community, distro as dist, nvidia, planner
@@ -316,6 +316,10 @@ def build(settings: Settings) -> dict[str, Action]:
             raise RuntimeError("Installing the NVIDIA driver did not complete")
         return "Installed. Restart to start using the NVIDIA driver."
 
+    def run_stress(a, log):
+        res = stress.run(int(a.get("seconds", 30)), log)
+        return json.dumps(res)
+
     def check_updates(a, log):
         log("Checking for updates...")
         return json.dumps(planner.check_updates(get_distro()))
@@ -343,6 +347,8 @@ def build(settings: Settings) -> dict[str, Action]:
             "components": planner.component_status(get_device(), get_distro())}),
         "get_community": Action(POLKIT_READ, get_community),
         "get_nvidia": Action(POLKIT_READ, lambda a: {**nvidia.info(), "plan": nvidia.plan(get_device(), get_distro())}),
+        "list_tests": Action(POLKIT_READ, lambda a: [{"id": i, "title": systemtest.TITLES[i]} for i in systemtest.check_ids()]),
+        "run_test": Action(POLKIT_READ, lambda a: systemtest.run_check(a["id"], systemtest.Ctx(get_device(), get_distro()))),
         "get_kernel": Action(POLKIT_READ, lambda a: planner.kernel_status(get_device(), get_distro())),
         "plan_install": Action(POLKIT_READ, lambda a: planner.plan_install(a["ids"], get_device(), get_distro()).to_dict()),
         # hardware controls
@@ -366,6 +372,7 @@ def build(settings: Settings) -> dict[str, Action]:
         "revert_fix": Action(POLKIT_ADMIN, revert_fix, job=True),
         "install": Action(POLKIT_ADMIN, do_install, job=True),
         "setup_repo": Action(POLKIT_ADMIN, setup_repo, job=True),
+        "stress_test": Action(POLKIT_CONTROL, run_stress, job=True),
         "install_nvidia": Action(POLKIT_ADMIN, install_nvidia, job=True),
         "install_community": Action(POLKIT_ADMIN, install_community, job=True),
         "remove_community": Action(POLKIT_ADMIN, remove_community, job=True),

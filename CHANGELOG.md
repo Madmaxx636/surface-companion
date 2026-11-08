@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.0
+
+- **System test** page. A read-only health check of 18 things (Surface kernel, Surface Aggregator, keyboard and
+  touchpad, touchscreen and pen service, brightness, performance profiles, battery health, temperatures and throttling,
+  missing firmware, Surface driver errors in the kernel log, Wi-Fi, cameras, discrete GPU, sleep, services, Secure Boot
+  key, update source, disk space), each Pass / Warning / Fail / Skipped with a plain explanation and a link to where to
+  fix it.
+- **Hands-on tests** (press, plug, listen, look; nothing is changed): keyboard (every physical key lights up, by
+  hardware key code so it works with any layout), mouse / touchpad / touchscreen, speakers (left, right, both tones),
+  ports (live plug and unplug events for USB, USB-C, display outputs and the audio jack), camera (one test photo from
+  the camera you pick; kept only in a temporary folder), and a Surface Book screen detach / Type Cover keyboard detach
+  test that only watches and never detaches anything itself.
+- **Stress test** (Advanced view): loads every CPU core for 30 to 120 seconds, shows temperature, clock speed, fan and
+  throttling, and stops by itself above 95 C. Refuses to start on a low battery.
+- Copy or save a plain-text report for bug reports.
+- Fixed, found by running the new test on a real Surface Laptop 3:
+  - The "Device wakes up in a bag" fix never worked: its script had the app's marker line above `#!/bin/sh`, so
+    systemd failed with "Exec format error". The shebang is now always the first line, and the fix shows as not applied
+    until it is re-applied, so Apply repairs an existing broken install.
+  - "Restart touch service" said iptsd was not installed when no instance was running (the normal state after a resume
+    or device reset). It now finds the Intel touch controller and starts iptsd for it.
+  - Touchpads were counted as touchscreens when deciding whether iptsd is needed.
+
 ## 0.2.2
 
 - **System option everywhere the app can override something.** "System" means the app does not control it and

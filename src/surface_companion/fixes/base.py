@@ -50,7 +50,11 @@ def write_managed(path: str, body: str, mode: int = 0o644) -> None:
     if pp.exists() and not is_managed(path):
         raise RuntimeError(f"{path} already exists and was not created by this app; not overwriting it")
     pp.parent.mkdir(parents=True, exist_ok=True)
-    pp.write_text(MARK + body)
+    if body.startswith("#!"):                    # a script's shebang has to be its very first line
+        first, _, rest = body.partition("\n")
+        pp.write_text(first + "\n" + MARK + rest)
+    else:
+        pp.write_text(MARK + body)
     os.chmod(pp, mode)
 
 

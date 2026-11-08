@@ -453,7 +453,8 @@ def build() -> list[Fix]:
             "Stops the USB controller and lid from waking the device. Wake it with the power button instead.",
             "Sleep", WIKI + "Known-Issues-and-FAQ", "optional",
             applies=lambda c: surface(c) and sysfs.p("/proc/acpi/wakeup").exists() and sysfs.have("systemctl"),
-            detect=_file_state(NOWAKE_UNIT), apply=_nowake_apply, revert=_nowake_revert,
+            detect=lambda c: "applied" if (is_managed(NOWAKE_UNIT) and (sysfs.read(NOWAKE_SCRIPT, "") or "").startswith("#!"))
+            else "available", apply=_nowake_apply, revert=_nowake_revert,
             recommend=lambda c: c.dev.family == "go"),
         Fix("wifi-powersave", "Wi-Fi drops (Marvell 88W8897 cards)",
             "Turns off Wi-Fi power saving and MAC randomisation while scanning in NetworkManager. "
