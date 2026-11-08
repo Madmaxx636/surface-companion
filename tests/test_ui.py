@@ -203,3 +203,183 @@ def test_book_page_offers_nvidia_install_only_when_driver_is_not_nvidia(root, mo
     w.tray = None
     w.timer.stop()
     w.close()
+
+
+def test_performance_page_selects_system_until_you_choose_a_profile(root, monkeypatch):
+    from surface_companion.ui import prefs
+    monkeypatch.setattr(prefs, "get", lambda k, d=None: d)
+    monkeypatch.setattr(prefs, "put", lambda k, v: None)
+    from surface_companion.ui.backend import Backend
+    from surface_companion.ui.main import MainWindow
+    app = _app()
+    w = MainWindow(Backend(session_bus=True))
+    w.show()
+    page = w.pages["performance"]
+    perf = {"available": True, "source": "platform_profile", "current": "balanced",
+            "choices": [{"id": "low-power", "label": "Battery Saver", "hint": "h"},
+                        {"id": "balanced", "label": "Recommended", "hint": "h"}]}
+    base = {"performance": perf, "thermal": {"temps": [], "fans": [], "fan_levels": [], "all_sensors": [],
+                                             "throttle": {"level": 0, "max": 10}, "thermald": {"installed": False, "active": False}},
+            "clocks": {}}
+    page.update_state({**base, "overrides": {"profile": False}})
+    assert list(page.profiles.buttons)[0] == "system" and page.profiles.buttons["system"].isChecked()
+    assert "Right now: Recommended" in page.profiles.hints["system"].text()
+    page.update_state({**base, "overrides": {"profile": True}})
+    assert page.profiles.buttons["balanced"].isChecked() and not page.profiles.buttons["system"].isChecked()
+    w.tray = None
+    w.timer.stop()
+    w.close()
+
+
+def _win(monkeypatch, saved=None):
+    from surface_companion.ui import prefs
+    saved = {} if saved is None else saved
+    monkeypatch.setattr(prefs, "get", lambda k, d=None: saved.get(k, d))
+    monkeypatch.setattr(prefs, "put", lambda k, v: saved.__setitem__(k, v))
+    from surface_companion.ui.backend import Backend
+    from surface_companion.ui.main import MainWindow
+    app = _app()
+    w = MainWindow(Backend(session_bus=True))
+    w.show()
+    w.tray = None
+    w.timer.stop()
+    return app, w, saved
+
+
+def _base_state(**over):
+    st = {"device": {"model": "Surface Laptop 3", "family": "laptop", "kernel": "k", "is_surface": True, "has_dtx": False,
+                     "surface_kernel": True, "cpu_vendor": "intel"},
+          "display": {"screen": {"percent": 50, "name": "x", "value": 1, "max": 2}, "keyboard": {"name": "k", "value": 2, "max": 3}},
+          "performance": {"available": True, "current": "balanced", "source": "platform_profile",
+                          "choices": [{"id": "low-power", "label": "Battery Saver", "hint": "h"},
+                                      {"id": "balanced", "label": "Recommended", "hint": "h"}]},
+          "thermal": {"temps": [], "fans": [], "fan_levels": [], "all_sensors": [], "throttle": {"level": 0, "max": 10},
+                      "thermald": {"installed": False, "active": False}},
+          "clocks": {}, "battery": {"present": True, "percent": 85, "status": "Charging", "charge_limit": None,
+                                     "health_percent": 90, "cycles": 1},
+          "sleep": {"mem_sleep": {"modes": ["s2idle", "deep"], "current": "s2idle"}, "s0ix_residency_us": 0,
+                    "can_hibernate": False, "lid_wake": True, "lid_action": "default"},
+          "book": {"dtx": False, "dgpu": None}, "overrides": {}, "auto_profile_config": None}
+    st.update(over)
+    return st
+
+
+def test_brightness_system_toggle_locks_both_sliders_and_is_remembered(root, monkeypatch):
+    app, w, saved = _win(monkeypatch)
+    w.state = _base_state()
+    page = w.pages["display"]
+    page.update_state(w.state)
+    assert page.bright_row.isEnabled() and not page.bright_system.isChecked()
+    w.set_brightness_system(True)
+    assert saved["brightness_system"] is True
+    page.update_state(w.state)
+    assert not page.bright_row.isEnabled() and page.bright_system.isChecked()
+    assert "system" in page.bright_row.desc.text().lower()
+    w.pages["overview"].update_state(w.state)
+    assert not w.pages["overview"].bright.isEnabled()
+    w.set_brightness_system(False)
+    page.update_state(w.state)
+    assert page.bright_row.isEnabled()
+    w.close()
+
+
+def test_sleep_master_switch_disables_the_individual_controls(root, monkeypatch):
+    app, w, saved = _win(monkeypatch)
+    page = w.pages["sleep"]
+    page.update_state(_base_state())                        # no overrides, lid default: system manages sleep
+    assert page.sleep_system.isChecked() and not page.lid_row.isEnabled() and not page.mode_row.isEnabled()
+    saved["sleep_manual"] = True                            # user switched the master off
+    page.update_state(_base_state())
+    assert not page.sleep_system.isChecked() and page.lid_row.isEnabled() and page.mode_row.isEnabled()
+    saved.clear()
+    page.update_state(_base_state(overrides={"mem_sleep": True}))   # an existing override means manual by default
+    assert not page.sleep_system.isChecked()
+    w.close()
+
+
+def test_charge_limit_unsupported_shows_reminder_and_supported_shows_limit(root, monkeypatch):
+    app, w, saved = _win(monkeypatch)
+    page = w.pages["sleep"]
+    page.update_state(_base_state())
+    assert not page.no_limit.isHidden() and not page.remind_toggle_row.isHidden() and page.limit_toggle_row.isHidden()
+    st = _base_state()
+    st["battery"]["charge_limit"] = 100
+    page.update_state(st)
+    assert page.no_limit.isHidden() and not page.limit_toggle_row.isHidden()
+    w.close()
+
+
+def test_unplug_reminder_fires_once_per_charge_at_the_chosen_level(root, monkeypatch):
+    app, w, saved = _win(monkeypatch, {"reminder_on": True, "reminder_pct": 80})
+    msgs = []
+    w.notify = lambda t, x: msgs.append(t)
+    low = _base_state()
+    low["battery"].update(percent=70, status="Charging")
+    w._check_charge_reminder(low)
+    assert msgs == []
+    hi = _base_state()
+    hi["battery"].update(percent=81, status="Charging")
+    w._check_charge_reminder(hi)
+    w._check_charge_reminder(hi)
+    assert len(msgs) == 1 and "81%" in msgs[0]
+    dis = _base_state()
+    dis["battery"].update(percent=79, status="Discharging")
+    w._check_charge_reminder(dis)
+    w._check_charge_reminder(hi)
+    assert len(msgs) == 2                                    # re-armed after unplugging
+    saved["reminder_on"] = False
+    w._reminded = False
+    w._check_charge_reminder(hi)
+    assert len(msgs) == 2
+    w.close()
+
+
+def test_no_reminder_when_hardware_limit_exists(root, monkeypatch):
+    app, w, saved = _win(monkeypatch, {"reminder_on": True, "reminder_pct": 50})
+    msgs = []
+    w.notify = lambda t, x: msgs.append(t)
+    st = _base_state()
+    st["battery"].update(percent=99, status="Charging", charge_limit=80)
+    w._check_charge_reminder(st)
+    assert msgs == []
+    w.close()
+
+
+def test_performance_page_automatic_card_and_defaults(root, monkeypatch):
+    app, w, saved = _win(monkeypatch)
+    page = w.pages["performance"]
+    calls = []
+    page.act = lambda action, args=None, ok=None: calls.append((action, args))
+    cfg = {"battery": "low-power", "ac": "balanced"}
+    page.update_state(_base_state(overrides={"auto_profile": True}, auto_profile_config=cfg))
+    assert list(page.profiles.buttons)[:2] == ["system", "auto"] and page.profiles.buttons["auto"].isChecked()
+    assert not page.auto_card.isHidden()
+    assert page.auto_batt.currentData() == "low-power" and page.auto_ac.currentData() == "balanced"
+    page.auto_ac.setCurrentIndex(page.auto_ac.findData("system"))
+    page._auto_changed()
+    assert calls[-1] == ("set_auto_profile", {"battery": "low-power", "ac": "system"})
+    page._chosen("auto")
+    assert calls[-1] == ("set_auto_profile", {"battery": "low-power", "ac": "balanced"})
+    page._chosen("balanced")
+    assert calls[-1] == ("set_profile", {"profile": "balanced"})
+    page.update_state(_base_state())
+    assert page.auto_card.isHidden() and page.profiles.buttons["system"].isChecked()
+    w.close()
+
+
+def test_keyboard_timeout_selector_reflects_state_and_sends_choice(root, monkeypatch):
+    app, w, saved = _win(monkeypatch)
+    page = w.pages["display"]
+    calls = []
+    page.act = lambda action, args=None, ok=None: calls.append((action, args))
+    page.update_state(_base_state(overrides={"kbd_timeout": 30}))
+    assert page.kbd_timeout.currentData() == 30
+    page.update_state(_base_state(overrides={"kbd_timeout": 45}))      # a value set elsewhere still shows
+    assert page.kbd_timeout.currentData() == 45
+    page.update_state(_base_state())
+    assert page.kbd_timeout.currentData() == "system"
+    i = page.kbd_timeout.findData(10)
+    page.kbd_timeout.setCurrentIndex(i)
+    page.kbd_timeout.activated.emit(i)
+    assert calls[-1] == ("set_kbd_timeout", {"seconds": 10})
+    w.close()

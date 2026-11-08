@@ -54,9 +54,15 @@ def set_lid_wake(enabled: bool) -> None:
 
 
 def set_lid_action(action: str) -> None:
-    if action not in LID_ACTIONS:
+    """`default` removes our override so the system (logind / the desktop) decides again."""
+    if action != "default" and action not in LID_ACTIONS:
         raise ValueError(f"Unsupported lid action: {action}")
     path = sysfs.p(LOGIND_DROPIN)
+    if action == "default":
+        if path.exists() and (sysfs.read(LOGIND_DROPIN, "") or "").startswith(MARK.strip()):
+            path.unlink()
+            sysfs.run(["systemctl", "kill", "-s", "HUP", "systemd-logind.service"])
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"{MARK}[Login]\nHandleLidSwitch={action}\nHandleLidSwitchExternalPower={action}\n")
     # logind re-reads its config on SIGHUP; restarting it would drop sessions.

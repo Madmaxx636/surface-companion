@@ -31,6 +31,9 @@ A tray icon gives one-click performance profile switching.
 **First run.** The app scans your Surface, shows what it found (hardware, kernel running/installed/available, fixes that
 apply), offers to set things up, and gives a short guided tour. Reopen it from "Setup and tour..." at the bottom left.
 
+**You stay in charge of what the app controls.** Every override has a "System" choice (performance profile, sleep,
+brightness, charge limit, GPU power) that hands control back to your desktop and firmware.
+
 **Simple and Advanced.** Simple shows the essentials. Advanced adds live CPU, graphics and memory clocks, history
 graphs, every sensor, technical rows, community drivers and all fixes.
 

@@ -112,6 +112,10 @@ class Daemon:
         finally:
             self.job_lock.release()
 
+    def _tick(self):
+        self.settings.tick_all()          # automatic profile and keyboard backlight timeout; no-ops unless enabled
+        return True
+
     # -- sleep/resume: firmware often resets performance mode, so put saved settings back
     def on_login1(self, conn, sender, path, iface, signal, params):
         if signal == "PrepareForSleep" and not params.unpack()[0]:
@@ -124,7 +128,7 @@ class Daemon:
 
         def bus_acquired(conn, name):
             self.conn = conn
-            conn.register_object(PATH, info, self.on_call, lambda *a: GLib.Variant("s", "0.2.1"), None)
+            conn.register_object(PATH, info, self.on_call, lambda *a: GLib.Variant("s", "0.2.2"), None)
             if self.bus_type == Gio.BusType.SYSTEM:
                 conn.signal_subscribe("org.freedesktop.login1", "org.freedesktop.login1.Manager", "PrepareForSleep",
                                       "/org/freedesktop/login1", None, Gio.DBusSignalFlags.NONE, self.on_login1)
@@ -132,6 +136,8 @@ class Daemon:
         def name_acquired(conn, name):
             for e in self.settings.reapply():
                 sys.stderr.write(f"reapply at start: {e}\n")
+            self.settings.kbd.start_if_configured()
+            GLib.timeout_add_seconds(1, self._tick)
 
         def name_lost(conn, name):
             sys.stderr.write(f"Could not own {name}\n")

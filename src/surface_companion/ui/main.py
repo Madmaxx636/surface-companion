@@ -31,6 +31,8 @@ class MainWindow(QMainWindow):
         self.history: dict[str, deque] = defaultdict(lambda: deque(maxlen=120))   # ~5 minutes of samples
         self.distro_name = ""
         self.advanced = bool(prefs.get("advanced", False))
+        self.brightness_system = bool(prefs.get("brightness_system", False))
+        self._reminded = False
         self._modal: list = []             # (widget, advanced_only, simple_only)
         self.setWindowTitle("Surface Companion")
         self.setWindowIcon(icons.app_icon())
@@ -171,7 +173,7 @@ class MainWindow(QMainWindow):
         if ids != self._tray_profiles:
             self._tray_profiles = ids
             self.tray_menu.clear()
-            for c in perf.get("choices", []) if perf.get("available") else []:
+            for c in ([{"id": "system", "label": "System"}] + perf["choices"]) if perf.get("available") else []:
                 a = QAction(c["label"], self.tray_menu)
                 a.setCheckable(True)
                 a.triggered.connect(lambda _=False, cid=c["id"]: self.backend.call(
@@ -181,9 +183,11 @@ class MainWindow(QMainWindow):
             self.tray_menu.addSeparator()
             self.tray_menu.addAction("Open Surface Companion", lambda: (self.showNormal(), self.activateWindow()))
             self.tray_menu.addAction("Quit", self.close_for_real)
+        ovs = self.state.get("overrides") or {}
         for a in self.tray_menu.actions():
             if a.data():
-                a.setChecked(a.data() == perf.get("current"))
+                a.setChecked(not ovs.get("auto_profile") and
+                             a.data() == (perf.get("current") if ovs.get("profile") else "system"))
 
     def close_for_real(self):
         self.tray = None
@@ -217,6 +221,31 @@ class MainWindow(QMainWindow):
         super().resizeEvent(e)
         if self.tour.isVisible():
             self.tour.show_step(self.tour.i)
+
+    def set_brightness_system(self, on: bool):
+        """On: the app never writes screen brightness; the desktop and firmware own it."""
+        self.brightness_system = on
+        prefs.put("brightness_system", on)
+        if self.state:
+            self.stack.currentWidget().update_state(self.state)
+
+    def notify(self, title: str, text: str):
+        if getattr(self, "tray", None):
+            self.tray.showMessage(title, text, icons.app_icon(), 15000)
+        else:
+            self.toast(f"{title}: {text}")
+
+    def _check_charge_reminder(self, st: dict):
+        bat = st.get("battery") or {}
+        if not (prefs.get("reminder_on", False) and bat.get("present") and bat.get("charge_limit") is None):
+            return
+        pct = int(prefs.get("reminder_pct", 80))
+        if bat.get("status") == "Charging" and (bat.get("percent") or 0) >= pct:
+            if not self._reminded:
+                self._reminded = True
+                self.notify(f"Battery is at {bat['percent']}%", f"You can unplug now (your reminder level is {pct}%).")
+        elif bat.get("status") != "Charging":
+            self._reminded = False
 
     # -- simple / advanced
     def register(self, w, advanced_only=False, simple_only=False):
@@ -262,6 +291,7 @@ class MainWindow(QMainWindow):
         self.state = st
         self._record(st["thermal"])
         self._record_clocks(st.get("clocks") or {})
+        self._check_charge_reminder(st)
         d = st["device"]
         self.nav["book"].setVisible(d["family"] == "book" or d["has_dtx"])
         cur = self.stack.currentWidget()

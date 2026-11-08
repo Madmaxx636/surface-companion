@@ -12,6 +12,7 @@ from ..fixes.base import Ctx
 from ..device import Device
 from ..pkg import community, distro as dist
 from .dialogs import JobDialog, confirm, confirm_risk, notify
+from . import prefs
 from .widgets import (Banner, Card, ChoiceGroup, Pill, Row, SliderRow, Sparkline, Toggle, button, label, separator)
 
 
@@ -296,7 +297,7 @@ class OverviewPage(Page):
         distro = self.win.distro_name
         self.sub.setText(" · ".join(x for x in (distro, f"kernel {d['kernel']}") if x))
         disp = st["display"]["screen"]
-        self.bright.setEnabled(bool(disp))
+        self.bright.setEnabled(bool(disp) and not self.win.brightness_system)
         if disp:
             self.bright.set_value(disp["percent"])
         self.therm.update_state(st["thermal"])
@@ -305,7 +306,12 @@ class OverviewPage(Page):
         perf = st["performance"]
         if perf.get("available"):
             cur = next((c["label"] for c in perf["choices"] if c["id"] == perf["current"]), perf["current"])
-            self.profile_row.set_desc(cur)
+            ov = (st.get("overrides") or {}).get("profile", False)
+            cfg = st.get("auto_profile_config")
+            names = {c["id"]: c["label"] for c in perf["choices"]}
+            self.profile_row.set_desc(
+                f"Automatic: {names.get(cfg['battery'], 'System')} on battery, {names.get(cfg['ac'], 'System')} plugged in"
+                if cfg and (st.get("overrides") or {}).get("auto_profile") else cur if ov else f"System ({cur})")
         else:
             self.profile_row.set_desc("Not available on this kernel")
         bat = st["battery"]
@@ -370,9 +376,17 @@ class OverviewPage(Page):
 class DisplayPage(Page):
     key, title = "display", "Display & Keyboard"
     subtitle = "Brightness for the screen and the keyboard backlight."
+    TIMEOUTS = [("system", "System (never)"), (5, "5 seconds"), (10, "10 seconds"), (15, "15 seconds"),
+                (30, "30 seconds"), (60, "1 minute"), (120, "2 minutes"), (300, "5 minutes")]
 
     def build(self):
         c = Card()
+        self.bright_system = Toggle()
+        self.bright_system.clicked.connect(lambda on: self.win.set_brightness_system(on))
+        c.add(Row("Let the system control brightness",
+                  "On: this app never changes the screen brightness; your desktop and the firmware do. "
+                  "Off: use the slider below.", self.bright_system))
+        c.add(separator())
         self.bright = SliderRow(1, 100)
         self.bright.committed.connect(lambda v: self.act("set_brightness", {"percent": v}))
         self.bright_row = Row("Screen brightness", "", self.bright)
@@ -382,15 +396,27 @@ class DisplayPage(Page):
         self.kbd = SliderRow(0, 3, "")
         self.kbd.committed.connect(lambda v: self.act("set_keyboard", {"level": v}))
         self.kbd_card.add(Row("Keyboard backlight", "Off to brightest.", self.kbd))
+        self.kbd_card.add(separator())
+        self.kbd_timeout = QComboBox()
+        for val, text in self.TIMEOUTS:
+            self.kbd_timeout.addItem(text, val)
+        self.kbd_timeout.activated.connect(lambda i: self.act("set_kbd_timeout", {"seconds": self.kbd_timeout.itemData(i)}))
+        self.kbd_card.add(Row("Turn off after no activity",
+                              "System: the app doesn't touch it. When set, the background service notes when any key, "
+                              "touch or mouse event happens so it knows you're away. It does not record what you type.",
+                              self.kbd_timeout))
         self.body.addWidget(self.kbd_card)
         self.no_kbd = label("This model has no keyboard backlight that Linux can control.", "muted")
         self.body.addWidget(self.no_kbd)
 
     def update_state(self, st):
         s, k = st["display"]["screen"], st["display"]["keyboard"]
-        self.bright_row.setEnabled(bool(s))
+        system = self.win.brightness_system
+        self.bright_system.set_silently(system)
+        self.bright_row.setEnabled(bool(s) and not system)
         if s:
             self.bright.set_value(s["percent"])
+            self.bright_row.set_desc("Controlled by the system." if system else "")
         else:
             self.bright_row.set_desc("No controllable backlight found.")
         self.kbd_card.setVisible(bool(k))
@@ -398,6 +424,14 @@ class DisplayPage(Page):
         if k:
             self.kbd.slider.setRange(0, k["max"])
             self.kbd.set_value(k["value"])
+            secs = (st.get("overrides") or {}).get("kbd_timeout") or "system"
+            i = self.kbd_timeout.findData(secs)
+            if i < 0:
+                self.kbd_timeout.addItem(f"{secs} seconds", secs)
+                i = self.kbd_timeout.count() - 1
+            self.kbd_timeout.blockSignals(True)
+            self.kbd_timeout.setCurrentIndex(i)
+            self.kbd_timeout.blockSignals(False)
 
 
 # ------------------------------------------------------------------------------------------ performance
@@ -408,10 +442,19 @@ class PerformancePage(Page):
 
     def build(self):
         self.profiles = ChoiceGroup()
-        self.profiles.chosen.connect(lambda cid: self.act("set_profile", {"profile": cid}))
+        self.profiles.chosen.connect(self._chosen)
         self.unavailable = label("This kernel doesn't expose a performance profile. The linux-surface kernel does.",
                                  "muted")
         self.body.addWidget(self.profiles)
+        self.auto_card = Card("Automatic: one profile per power source")
+        self.auto_batt, self.auto_ac = QComboBox(), QComboBox()
+        for cb, key in ((self.auto_batt, "battery"), (self.auto_ac, "ac")):
+            cb.activated.connect(lambda _i: self._auto_changed())
+        self.auto_card.add(Row("On battery", "", self.auto_batt))
+        self.auto_card.add(Row("Plugged in", "", self.auto_ac))
+        self.auto_card.add(label("“System” leaves the profile alone for that power source.", "muted"))
+        self.auto_card.hide()
+        self.body.addWidget(self.auto_card)
         self.body.addWidget(self.unavailable)
         self.simple_temp = self.simple(Card("Temperature"))
         self.simple_temp_text = label("")
@@ -431,14 +474,49 @@ class PerformancePage(Page):
         self.thermald.add(button("See thermal fixes", on_click=lambda: self.win.goto("fixes")))
         self.body.addWidget(self.thermald)
 
+    def _chosen(self, cid: str):
+        if cid == "auto":
+            ids = [c["id"] for c in (self._perf or {}).get("choices", [])]
+            batt = "low-power" if "low-power" in ids else "balanced" if "balanced" in ids else "system"
+            ac = "balanced" if "balanced" in ids else "system"
+            self.act("set_auto_profile", {"battery": batt, "ac": ac})
+        else:
+            self.act("set_profile", {"profile": cid})
+
+    def _auto_changed(self):
+        self.act("set_auto_profile", {"battery": self.auto_batt.currentData(), "ac": self.auto_ac.currentData()})
+
     def update_state(self, st):
+        self._perf = st["performance"]
         perf, th = st["performance"], st["thermal"]
         ok = perf.get("available")
         self.profiles.setVisible(bool(ok))
         self.unavailable.setVisible(not ok)
         if ok:
-            self.profiles.set_choices(perf["choices"])
-            self.profiles.set_current(perf["current"])
+            ovs = st.get("overrides") or {}
+            ov, auto = ovs.get("profile", False), ovs.get("auto_profile", False)
+            cur_label = next((c["label"] for c in perf["choices"] if c["id"] == perf["current"]), perf["current"])
+            self.profiles.set_choices([{"id": "system", "label": "System",
+                                        "hint": "Let your system decide (desktop power settings, firmware)."},
+                                       {"id": "auto", "label": "Automatic",
+                                        "hint": "A different profile on battery and when plugged in."}]
+                                      + perf["choices"])
+            self.profiles.set_hint("system", f"Let your system decide (desktop power settings, firmware). "
+                                              f"Right now: {cur_label}.")
+            self.profiles.set_current("auto" if auto else perf["current"] if ov else "system")
+            cfg = st.get("auto_profile_config")
+            self.auto_card.setVisible(bool(auto and cfg))
+            if auto and cfg:
+                opts = [("system", "System")] + [(c["id"], c["label"]) for c in perf["choices"]]
+                for cb, key in ((self.auto_batt, "battery"), (self.auto_ac, "ac")):
+                    if [cb.itemData(i) for i in range(cb.count())] != [o[0] for o in opts]:
+                        cb.clear()
+                        for oid, text in opts:
+                            cb.addItem(text, oid)
+                    if not cb.view().isVisible():
+                        cb.blockSignals(True)
+                        cb.setCurrentIndex(max(0, cb.findData(cfg[key])))
+                        cb.blockSignals(False)
         self.therm.update_state(th)
         self.clocks.update_state(st.get("clocks") or {})
         self.simple_temp_text.setText(_simple_thermal_line(th))
@@ -463,16 +541,24 @@ class PowerPage(Page):
 
     def build(self):
         c = Card("Sleep")
+        self.sleep_system = Toggle()
+        self.sleep_system.clicked.connect(self._sleep_master)
+        c.add(Row("Let the system manage sleep",
+                  "On: this app doesn't change the sleep mode, lid behaviour or lid wake, and gives back anything it "
+                  "changed. Off: choose them below.", self.sleep_system))
+        c.add(separator())
         self.mode = QComboBox()
         self.mode.activated.connect(lambda i: self.act("set_mem_sleep", {"mem_sleep": self.mode.itemData(i)}))
         self.mode_row = Row("Sleep mode", "", self.mode)
         c.add(self.adv(self.mode_row))
         c.add(self.adv(separator()))
         self.lid = QComboBox()
+        self.lid.addItem("System", "default")
         for k, v in LID:
             self.lid.addItem(v, k)
         self.lid.activated.connect(lambda i: self.act("set_lid_action", {"action": self.lid.itemData(i)}))
-        c.add(Row("When the lid closes", "Applies on battery and on power.", self.lid))
+        self.lid_row = Row("When the lid closes", "Applies on battery and on power.", self.lid)
+        c.add(self.lid_row)
         c.add(separator())
         self.lidwake = Toggle()
         self.lidwake.clicked.connect(lambda on: self.act("set_lid_wake", {"enabled": on}))
@@ -492,31 +578,72 @@ class PowerPage(Page):
         self.bat = Card("Battery")
         self.bat_text = label("")
         self.bat.add(self.bat_text)
+        self.limit_on = Toggle()
+        self.limit_on.clicked.connect(self._limit_toggled)
+        self.limit_toggle_row = Row("Limit charging", "Off: the system decides (charges to 100%). On: stop at the level "
+                                                      "below, which makes the battery last longer.", self.limit_on)
+        self.bat.add(self.limit_toggle_row)
         self.limit = SliderRow(50, 100)
         self.limit.committed.connect(lambda v: self.act("set_charge_limit", {"charge_limit": v}))
-        self.limit_row = Row("Charge limit", "Stopping below 100% makes the battery last longer.", self.limit)
+        self.limit_row = Row("Charge limit", "", self.limit)
         self.bat.add(self.limit_row)
+        # Where the kernel offers no charge limit, a reminder is the honest alternative
+        self.no_limit = label("This device's battery driver doesn't offer a charge limit to Linux, so nothing here can "
+                              "stop charging. The app can remind you to unplug instead.", "muted")
+        self.bat.add(self.no_limit)
+        self.remind_on = Toggle()
+        self.remind_on.clicked.connect(lambda on: prefs.put("reminder_on", on))
+        self.remind_toggle_row = Row("Remind me to unplug", "A notification when charging reaches the level below. "
+                                                            "Needs the app running (it stays in the tray).", self.remind_on)
+        self.bat.add(self.remind_toggle_row)
+        self.remind = SliderRow(50, 100)
+        self.remind.set_value(int(prefs.get("reminder_pct", 80)))
+        self.remind.committed.connect(lambda v: prefs.put("reminder_pct", v))
+        self.remind_row = Row("Remind at", "", self.remind)
+        self.bat.add(self.remind_row)
         self.body.addWidget(self.bat)
+
+    def _sleep_master(self, on: bool):
+        prefs.put("sleep_manual", not on)
+        if on:
+            self.act("sleep_system")
+        else:
+            self.win.refresh()
+
+    def _limit_toggled(self, on: bool):
+        if on:
+            self.act("set_charge_limit", {"charge_limit": 80})
+        else:
+            self.act("set_charge_limit", {"charge_limit": "system"})
 
     def update_state(self, st):
         sl = st["sleep"]
         modes = sl["mem_sleep"]["modes"]
+        ov = (st.get("overrides") or {})
         self.mode.blockSignals(True)
-        if [self.mode.itemData(i) for i in range(self.mode.count())] != modes:
+        want = ["system"] + modes
+        if [self.mode.itemData(i) for i in range(self.mode.count())] != want:
             self.mode.clear()
+            self.mode.addItem("System", "system")
             for m in modes:
                 self.mode.addItem(SLEEP_NAMES.get(m, m), m)
-        self.mode.setCurrentIndex(max(0, modes.index(sl["mem_sleep"]["current"])) if sl["mem_sleep"]["current"] in modes else 0)
+        cur = sl["mem_sleep"]["current"]
+        self.mode.setCurrentIndex(self.mode.findData(cur) if ov.get("mem_sleep") and cur in modes else 0)
         self.mode.blockSignals(False)
-        self.mode_row.setEnabled(len(modes) > 1)
+        manual = prefs.get("sleep_manual", None)
+        if manual is None:       # first time: manual if the app is already overriding anything
+            manual = bool(ov.get("mem_sleep") or ov.get("lid_wake") or sl["lid_action"] != "default")
+        manual = bool(manual) if not isinstance(manual, str) else manual.lower() == "true"
+        self.sleep_system.set_silently(not manual)
+        self.lid_row.setEnabled(manual)
+        self.mode_row.setEnabled(len(modes) > 1 and manual)
         self.mode_row.set_desc("Only one mode is available on this device." if len(modes) <= 1 else
-                               "Modern standby is what Surface firmware is built for.")
+                               "System leaves it to the kernel. A choice here is re-applied after every wake. Switching "
+                               "back to System takes full effect after a restart.")
         i = self.lid.findData(sl["lid_action"])
         if i >= 0 and not self.lid.view().isVisible():
             self.lid.setCurrentIndex(i)
-        elif sl["lid_action"] == "default" and not self.lid.view().isVisible():
-            self.lid.setCurrentIndex(0)
-        self.lidwake_row.setEnabled(sl["lid_wake"] is not None)
+        self.lidwake_row.setEnabled(sl["lid_wake"] is not None and manual)
         if sl["lid_wake"] is not None:
             self.lidwake.set_silently(sl["lid_wake"])
         else:
@@ -534,9 +661,16 @@ class PowerPage(Page):
                 lines.append(f"Health: {b['health_percent']}% of original capacity")
             self.bat_text.setText("\n".join(lines))
             lim = b.get("charge_limit")
-            self.limit_row.setVisible(lim is not None)
+            on = bool((st.get("overrides") or {}).get("charge_limit", False))
+            self.limit_toggle_row.setVisible(lim is not None)
+            self.limit_row.setVisible(lim is not None and on)
+            for w in (self.no_limit, self.remind_toggle_row, self.remind_row):
+                w.setVisible(lim is None)
             if lim is not None:
+                self.limit_on.set_silently(on)
                 self.limit.set_value(lim)
+            else:
+                self.remind_on.set_silently(bool(prefs.get("reminder_on", False)))
 
 
 # ------------------------------------------------------------------------------------------ surface book
@@ -564,8 +698,8 @@ class BookPage(Page):
         self.gpu_text = label("")
         self.gpu.add(self.gpu_text)
         self.gpu_on = Toggle()
-        self.gpu.add(Row("Keep the GPU powered", "Off lets it sleep when idle, which saves battery. Turn on "
-                         "if a game or compute job stutters.", self.gpu_on))
+        self.gpu.add(Row("Keep the GPU powered", "Off: the system decides and lets it sleep when idle, which saves battery. "
+                         "Turn on if a game or compute job stutters.", self.gpu_on))
         self.gpu_on.clicked.connect(lambda on: self.act("set_dgpu_power", {"dgpu_always_on": on}))
         self.nv_btn = button("Install NVIDIA driver…", "primary", lambda: self.win.install_nvidia())
         self.nv_row = Row("NVIDIA driver", "", self.nv_btn)

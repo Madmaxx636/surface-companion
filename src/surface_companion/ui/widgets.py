@@ -213,6 +213,7 @@ class ChoiceGroup(QWidget):
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
         self.buttons: dict[str, QPushButton] = {}
+        self.hints: dict[str, QLabel] = {}
         self._ids: tuple = ()
 
     def set_choices(self, choices: list[dict]):
@@ -224,6 +225,7 @@ class ChoiceGroup(QWidget):
             self.group.removeButton(b)
             b.deleteLater()
         self.buttons = {}
+        self.hints = {}
         for c in choices:
             b = QPushButton()
             b.setObjectName("choice")
@@ -237,12 +239,19 @@ class ChoiceGroup(QWidget):
                 if text:
                     lb = QLabel(text)
                     lb.setObjectName(name) if name else None
+                    if name:
+                        self.hints[c["id"]] = lb
                     lb.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
                     bl.addWidget(lb)
             b.clicked.connect(lambda _=False, cid=c["id"]: self.chosen.emit(cid))
             self.group.addButton(b)
             self.lay.addWidget(b)
             self.buttons[c["id"]] = b
+
+    def set_hint(self, cid: str, text: str):
+        lb = self.hints.get(cid)
+        if lb and lb.text() != text:
+            lb.setText(text)
 
     def set_current(self, cid: str | None):
         b = self.buttons.get(cid or "")

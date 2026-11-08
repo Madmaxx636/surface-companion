@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import device, fixes, sysfs
+from . import automation, device, fixes, sysfs
 from .fixes.base import Ctx
 from .hw import battery, book, camera, clocks, display, pen, perf, sleep, thermal
 from .pkg import community, distro as dist, nvidia, planner
@@ -45,8 +45,37 @@ class Settings:
         except OSError:
             pass
 
+    def clear(self, key) -> None:
+        if key in self.data:
+            del self.data[key]
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self.path.write_text(json.dumps(self.data, indent=1))
+            except OSError:
+                pass
+
+    def overrides(self) -> dict:
+        """Which settings the app is currently controlling (everything else is left to the system)."""
+        o = {k: k in self.data for k in ("profile", "mem_sleep", "charge_limit", "dgpu_always_on")}
+        o["lid_wake"] = "orig_lid_wake" in self.data
+        o["auto_profile"] = "auto_profile" in self.data
+        o["kbd_timeout"] = self.data.get("kbd_timeout")
+        return o
+
+    def tick_all(self) -> None:
+        for name in ("auto", "kbd"):
+            c = getattr(self, name, None)
+            if c:
+                try:
+                    c.tick()
+                except Exception:  # noqa: BLE001 - a failing automation must never take the service down
+                    pass
+
     def reapply(self) -> list[str]:
         errors = []
+        if getattr(self, "auto", None):
+            self.auto._last = None            # power source may have changed while asleep
+            self.auto.tick()
         steps = [("profile", perf.set_profile), ("mem_sleep", sleep.set_mem_sleep),
                  ("charge_limit", battery.set_charge_limit), ("dgpu_always_on", book.set_dgpu_power)]
         for key, fn in steps:
@@ -150,11 +179,60 @@ class Action:
 
 
 def build(settings: Settings) -> dict[str, Action]:
-    def persist(key, fn):
+    auto = settings.auto = automation.AutoProfile(settings)
+    kbd = settings.kbd = automation.KbdTimeout(settings)
+    def persist(key, fn, on_system=None):
+        """Apply a setting and remember it. The value "system" instead hands control back: the app stops
+        overriding it (and stops re-applying it after resume), optionally resetting it first."""
         def run(a):
+            if a.get(key) == "system":
+                if on_system:
+                    try:
+                        on_system()
+                    except Exception:  # noqa: BLE001 - e.g. no charge limit on this battery; still release control
+                        pass
+                settings.clear(key)
+                return
             fn(a)
             settings.set(key, a[key] if key in a else None)
         return run
+
+    _persist_profile = persist("profile", lambda a: perf.set_profile(a["profile"]))
+
+    def set_profile(a):
+        _persist_profile(a)          # a fixed choice, or "system", both end automatic switching
+        auto.disable()
+
+    def set_kbd_timeout(a):
+        v = a["seconds"]
+        kbd.configure(None if v == "system" else int(v))
+
+    def set_lid_wake(a):
+        if "orig_lid_wake" not in settings.data:             # remember what the system had, to give it back later
+            cur = sleep.state()["lid_wake"]
+            if cur is not None:
+                settings.set("orig_lid_wake", cur)
+        sleep.set_lid_wake(bool(a["enabled"]))
+
+    def sleep_system(a):
+        """Hand all of sleep back to the system: sleep mode, lid action and lid wake."""
+        settings.clear("mem_sleep")
+        sleep.set_lid_action("default")
+        orig = settings.data.get("orig_lid_wake")
+        if orig is not None:
+            try:
+                sleep.set_lid_wake(bool(orig))
+            except Exception:  # noqa: BLE001
+                pass
+        settings.clear("orig_lid_wake")
+
+    def set_dgpu(a):
+        on = bool(a["dgpu_always_on"])
+        book.set_dgpu_power(on)
+        if on:
+            settings.set("dgpu_always_on", True)
+        else:
+            settings.clear("dgpu_always_on")      # auto = the system decides
 
     def apply_fix(a, log):
         f = fixes.get(a["id"])
@@ -253,7 +331,8 @@ def build(settings: Settings) -> dict[str, Action]:
 
     return {
         # reads
-        "get_state": Action(POLKIT_READ, lambda a: fast_state()),
+        "get_state": Action(POLKIT_READ, lambda a: {**fast_state(), "overrides": settings.overrides(),
+                                                    "auto_profile_config": settings.data.get("auto_profile")}),
         "get_slow_state": Action(POLKIT_READ, lambda a: slow_state()),
         "get_fixes": Action(POLKIT_READ, lambda a: [x for x in fixes.evaluate(_ctx())]),
         "get_software": Action(POLKIT_READ, lambda a: {
@@ -269,12 +348,16 @@ def build(settings: Settings) -> dict[str, Action]:
         # hardware controls
         "set_brightness": Action(POLKIT_CONTROL, lambda a: display.set_screen_percent(a["percent"])),
         "set_keyboard": Action(POLKIT_CONTROL, lambda a: display.set_keyboard_level(a["level"])),
-        "set_profile": Action(POLKIT_CONTROL, persist("profile", lambda a: perf.set_profile(a["profile"]))),
+        "set_profile": Action(POLKIT_CONTROL, set_profile),
+        "set_auto_profile": Action(POLKIT_CONTROL, lambda a: auto.configure(a["battery"], a["ac"])),
+        "set_kbd_timeout": Action(POLKIT_CONTROL, set_kbd_timeout),
+        "sleep_system": Action(POLKIT_CONTROL, sleep_system),
         "set_mem_sleep": Action(POLKIT_CONTROL, persist("mem_sleep", lambda a: sleep.set_mem_sleep(a["mem_sleep"]))),
-        "set_lid_wake": Action(POLKIT_CONTROL, lambda a: sleep.set_lid_wake(bool(a["enabled"]))),
+        "set_lid_wake": Action(POLKIT_CONTROL, set_lid_wake),
         "set_lid_action": Action(POLKIT_CONTROL, lambda a: sleep.set_lid_action(a["action"])),
-        "set_charge_limit": Action(POLKIT_CONTROL, persist("charge_limit", lambda a: battery.set_charge_limit(a["charge_limit"]))),
-        "set_dgpu_power": Action(POLKIT_CONTROL, persist("dgpu_always_on", lambda a: book.set_dgpu_power(bool(a["dgpu_always_on"])))),
+        "set_charge_limit": Action(POLKIT_CONTROL, persist("charge_limit", lambda a: battery.set_charge_limit(a["charge_limit"]),
+                                                           on_system=lambda: battery.set_charge_limit(100))),
+        "set_dgpu_power": Action(POLKIT_CONTROL, set_dgpu),
         "restart_touch": Action(POLKIT_CONTROL, lambda a: pen.restart_service()),
         "sleep_now": Action(POLKIT_CONTROL, lambda a: sleep.suspend_now(a.get("kind", "suspend"))),
         "detach_clipboard": Action(POLKIT_DETACH, lambda a: book.detach()),

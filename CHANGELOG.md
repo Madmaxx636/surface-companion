@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.2
+
+- **System option everywhere the app can override something.** "System" means the app does not control it and
+  gives back anything it changed.
+  - Performance profile: new System choice (selected by default) and an Automatic choice with one profile for
+    battery and one for plugged in, each of which can itself be System. The service switches when the power source
+    changes and after resume.
+  - Sleep: one "Let the system manage sleep" switch. Turning it on clears the saved sleep mode, removes the app's lid
+    action file and puts the lid-wake setting back to what it was before the app first changed it.
+  - Screen brightness: "Let the system control brightness" switch; while on, the app never changes brightness.
+  - Charge limit: a Limit charging switch (Off = system, resets to 100%), and on devices whose battery driver offers no
+    limit (Surface Laptop 3 does not), an unplug reminder notification at a level you choose instead.
+  - Discrete GPU power: off now means the system decides.
+- Keyboard backlight timeout: turn the backlight off after 5 s to 5 min without activity and back on when you return.
+  Works the same on every desktop, including Wayland, because the service listens for input at device level. It only
+  starts when you set a timeout, keeps nothing but the time of the last event, and never records what you type.
+  Untested on real hardware (needs a Surface with a controllable keyboard backlight).
+
 ## 0.2.1
 
 - NVIDIA graphics driver install for devices with a discrete NVIDIA GPU (Surface Book, Laptop Studio), on the Software
