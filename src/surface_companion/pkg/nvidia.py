@@ -34,6 +34,22 @@ def dkms_package_for(driver_pkg: str) -> str:
     return driver_pkg.replace("nvidia-driver-", "nvidia-dkms-", 1)
 
 
+TURING_FIRST_DEVICE_ID = 0x1E00     # PCI ids below this are Pascal or older (GTX 10xx and earlier)
+LEGACY_BRANCH = "580"               # last NVIDIA branch that still supports Pascal
+
+
+def pre_turing(dev: Device, gpu: dict | None) -> bool:
+    """Pascal and older cannot use NVIDIA's open kernel modules and were dropped after the 580 branch.
+    The Surface Book 2's GTX 1050 / 1060 are Pascal, so the model is enough even if the PCI id is unreadable."""
+    did = (gpu or {}).get("device_id")
+    return (did is not None and did < TURING_FIRST_DEVICE_ID) or dev.model_in(("Surface Book 2",))
+
+
+def _branch(version: str) -> int | None:
+    m = re.match(r"(\d+)\.", version or "")
+    return int(m.group(1)) if m else None
+
+
 def info() -> dict:
     g = book.dgpu()
     mods = sysfs.read("/proc/modules", "") or ""
@@ -64,28 +80,50 @@ def plan(dev: Device, d: dist.Distro) -> dict:
     if d.immutable:
         p.blockers.append("Image-based systems layer the driver differently. Follow your distribution's NVIDIA guide.")
     sb = secure_boot_on()
+    legacy = pre_turing(dev, book.dgpu())
+    if legacy and not p.blockers:
+        notes.append(f"Your GPU is from before NVIDIA's Turing generation (Pascal or older). NVIDIA's open kernel modules "
+                     f"(the '-open' packages) don't support it, and branches after {LEGACY_BRANCH} dropped it, so the "
+                     f"proprietary {LEGACY_BRANCH} driver is used even if your system recommends something newer.")
     if not p.blockers:
         if d.family == "debian" and d.id == "ubuntu" or (d.family == "debian" and "ubuntu" in d.name.lower()):
             drv = None
-            if sysfs.have("ubuntu-drivers"):
+            if legacy:
+                drv = f"nvidia-driver-{LEGACY_BRANCH}"                  # proprietary, not -open; ignores ubuntu-drivers
+                if not _apt_candidate(drv) or not _apt_candidate(dkms_package_for(drv)):
+                    p.blockers.append(f"{drv} isn't available from your apt sources, and it is the newest driver that "
+                                      "supports this GPU.")
+            elif sysfs.have("ubuntu-drivers"):
                 drv = parse_ubuntu_drivers(sysfs.run(["ubuntu-drivers", "devices"], timeout=60).stdout)
             else:
                 p.steps.append(Step("Install the driver finder", "cmd", argv=["apt-get", "install", "-y", "ubuntu-drivers-common"]))
                 notes.append("The recommended driver version is chosen after ubuntu-drivers-common is installed; "
                              "the list of packages is shown again once it is known.")
-            if drv:
+            if drv and not p.blockers:
                 p.steps.append(Step("Install the NVIDIA driver (DKMS build for your kernel)", "cmd",
                                     argv=["apt-get", "install", "-y", drv, dkms_package_for(drv)]))
-                notes.append(f"Recommended driver for your GPU: {drv}.")
-            elif sysfs.have("ubuntu-drivers"):
+                notes.append(f"{'Driver for your GPU' if legacy else 'Recommended driver for your GPU'}: {drv}.")
+            elif sysfs.have("ubuntu-drivers") and not legacy and not p.blockers:
                 p.blockers.append("ubuntu-drivers found no supported NVIDIA driver for this GPU.")
         elif d.family == "debian":
-            if _apt_candidate("nvidia-driver") and _apt_candidate("nvidia-kernel-dkms"):
+            cand = re.search(r"Candidate:\s*(\S+)", sysfs.run(["apt-cache", "policy", "nvidia-driver"]).stdout)
+            newest = _branch(cand.group(1)) if cand else None
+            if legacy and newest and newest > int(LEGACY_BRANCH):
+                p.blockers.append(f"Debian's nvidia-driver is version {cand.group(1)}, which no longer supports this GPU "
+                                  f"(the last branch that does is {LEGACY_BRANCH}). Look for your release's "
+                                  f"'nvidia-legacy-{LEGACY_BRANCH}xx-driver' packages, or use the open nouveau driver.")
+            elif _apt_candidate("nvidia-driver") and _apt_candidate("nvidia-kernel-dkms"):
                 p.steps.append(Step("Install the NVIDIA driver (DKMS build for your kernel)", "cmd",
                                     argv=["apt-get", "install", "-y", "nvidia-driver", "nvidia-kernel-dkms"]))
             else:
                 p.blockers.append("Debian's NVIDIA driver is in the 'non-free' section, which isn't enabled here. "
                                   "Enable contrib and non-free in your apt sources, run apt update, then try again.")
+        elif d.family == "arch" and legacy:
+            # nvidia-580xx-* live only in the AUR (not in the official repositories), so pacman cannot install them
+            p.blockers.append(f"Arch only packages the newest NVIDIA driver, which no longer supports this GPU. The "
+                              f"{LEGACY_BRANCH} branch is in the AUR: install nvidia-{LEGACY_BRANCH}xx-dkms and "
+                              f"nvidia-{LEGACY_BRANCH}xx-utils with your AUR helper (for example "
+                              f"yay -S nvidia-{LEGACY_BRANCH}xx-dkms nvidia-{LEGACY_BRANCH}xx-utils), then restart.")
         elif d.family == "arch":
             p.steps.append(Step("Install the NVIDIA driver (DKMS build for your kernel)", "cmd",
                                 argv=["pacman", "-S", "--needed", "--noconfirm", "nvidia-dkms", "nvidia-utils"]))
@@ -105,7 +143,7 @@ def plan(dev: Device, d: dist.Distro) -> dict:
              "It stops the open 'nouveau' driver from loading.",
              "Keep your previous kernel in the boot menu in case something goes wrong. On a Surface Book the screen "
              "is driven by the Intel GPU, so a failed NVIDIA module should not leave you without a display."]
-    return {**p.to_dict(), "interactive": interactive, "secure_boot": sb, "risks": risks,
+    return {**p.to_dict(), "interactive": interactive, "secure_boot": sb, "risks": risks, "pre_turing": legacy,
             "notes": notes + ["Afterwards, run a program on the NVIDIA GPU with prime-run, or switcherooctl launch."]}
 
 

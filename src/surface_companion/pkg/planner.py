@@ -67,6 +67,8 @@ class Plan:
 def applicable(c: catalog.Component, dev: Device, d: dist.Distro) -> tuple[bool, str]:
     if d.family not in c.packages:
         return False, f"No package is published for {d.name or 'this distribution'}"
+    if c.models and not dev.model_in(c.models):
+        return False, "Only for " + " and ".join(c.models)
     if c.only_book and not dev.is_book:
         return False, "Only for Surface Book"
     if c.only_intel and dev.cpu_vendor != "intel":
@@ -196,6 +198,59 @@ def _ostree_steps(ids: list[str], pkgs_by_id: dict[str, list[str]], plan: Plan) 
     plan.notes.append("The change takes effect on the next boot. Undo with “rpm-ostree rollback”.")
 
 
+def active_session_users() -> list[str]:
+    """Names of people logged in at the machine right now (local, graphical or console; never root)."""
+    out: list[str] = []
+    r = sysfs.run(["loginctl", "list-sessions", "--no-legend"])
+    for ln in r.stdout.splitlines():
+        parts = ln.split()
+        if not parts:
+            continue
+        info = sysfs.run(["loginctl", "show-session", parts[0], "-p", "Name", "-p", "Active", "-p", "Class", "-p", "Remote"]).stdout
+        kv = dict(x.split("=", 1) for x in info.splitlines() if "=" in x)
+        if kv.get("Active") == "yes" and kv.get("Class") == "user" and kv.get("Remote") != "yes" \
+                and kv.get("Name") and kv["Name"] != "root" and kv["Name"] not in out:
+            out.append(kv["Name"])
+    return out
+
+
+def _unit_state(argv: list[str]) -> str:
+    r = sysfs.run(argv)
+    return (r.stdout or "").strip() or "unknown"
+
+
+def service_states(c: catalog.Component) -> dict:
+    """Is each unit of this component running? System units, and user units for each logged-in user."""
+    st: dict = {"system": {u: _unit_state(["systemctl", "is-active", u]) for u in c.services}, "user": {}}
+    if c.user_services:
+        for user in active_session_users():
+            st["user"][user] = {u: _unit_state(["systemctl", "--user", f"--machine={user}@.host", "is-active", u])
+                                for u in c.user_services}
+    return st
+
+
+def services_running(st: dict) -> bool:
+    return all(v == "active" for v in st["system"].values()) and \
+        all(v == "active" for per in st["user"].values() for v in per.values()) and (bool(st["system"]) or bool(st["user"]))
+
+
+def _service_steps(selected: list[catalog.Component], plan: Plan) -> None:
+    """After installing, turn the component's services on (system, and --user for whoever is logged in)."""
+    for c in selected:
+        for unit in c.services:
+            plan.steps.append(Step(f"Enable and start {unit}", "cmd", argv=["systemctl", "enable", "--now", unit]))
+        if c.user_services:
+            users = active_session_users()
+            for unit in c.user_services:
+                for user in users:
+                    plan.steps.append(Step(f"Enable and start {unit} for {user}", "cmd",
+                                           argv=["systemctl", "--user", f"--machine={user}@.host", "enable", "--now", unit]))
+                if not users:
+                    plan.steps.append(Step(f"Enable {unit} for everyone's next login", "cmd",
+                                           argv=["systemctl", "--global", "enable", unit]))
+                    plan.notes.append(f"Nobody is logged in right now, so {unit} is enabled for the next login instead.")
+
+
 def plan_install(ids: list[str], dev: Device, d: dist.Distro) -> Plan:
     plan = Plan()
     verdict = assess(dev, d)
@@ -264,6 +319,7 @@ def plan_install(ids: list[str], dev: Device, d: dist.Distro) -> Plan:
         plan.steps.append(Step("Update the system and install packages", "cmd",
                                argv=["pacman", "-Syu", "--needed", "--noconfirm", *pkgs]))
         plan.notes.append("Arch installs always update the whole system together with the new packages.")
+    _service_steps([catalog.by_id(cid) for cid in pkgs_by_id], plan)
     if "kernel" in pkgs_by_id and d.family in ("debian", "arch"):
         plan.notes.append("Check your bootloader afterwards; the Surface kernel must be the one that boots.")
     return plan
@@ -368,8 +424,12 @@ def component_status(dev: Device, d: dist.Distro) -> list[dict]:
         if ok and verdict["level"] == "blocked":
             ok, why = False, "Not possible on this system"
         ver = dist.installed_version(d, c.check_pkg[d.family]) if ok and d.family in c.check_pkg else None
-        rows.append({"id": c.id, "title": c.title, "why": c.why, "installable": ok, "reason": why,
-                     "installed": ver, "reboot": c.reboot})
+        row = {"id": c.id, "title": c.title, "why": c.why, "installable": ok, "reason": why,
+               "installed": ver, "reboot": c.reboot, "services": None}
+        if ver and (c.services or c.user_services):
+            st = service_states(c)
+            row["services"] = {"state": st, "running": services_running(st)}
+        rows.append(row)
     return rows
 
 

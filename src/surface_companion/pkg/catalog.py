@@ -27,6 +27,9 @@ class Component:
     packages: dict[str, list[str]]            # family -> package names
     needs_repo: bool = False                  # comes from the linux-surface repository
     only_book: bool = False
+    models: tuple[str, ...] = ()              # when set, only these models (matched like Device.model_in)
+    services: tuple[str, ...] = ()            # system units to enable and start after installing
+    user_services: tuple[str, ...] = ()       # systemd --user units to enable and start for the logged-in user
     only_intel: bool = False
     reboot: bool = False
     check_pkg: dict[str, str] = field(default_factory=dict)   # family -> package queried for "installed"
@@ -73,7 +76,8 @@ COMPONENTS: list[Component] = [
         "Makes detaching the Surface Book screen fast and safe: runs your unmount script first and "
         "shows a notification.",
         {"debian": ["surface-dtx-daemon"], "fedora": ["surface-dtx-daemon"], "arch": ["surface-dtx-daemon"]},
-        needs_repo=True, only_book=True,
+        needs_repo=True, only_book=True, models=("Surface Book 2", "Surface Book 3"),
+        services=("surface-dtx-daemon.service",), user_services=("surface-dtx-userd.service",),
         check_pkg={"debian": "surface-dtx-daemon", "fedora": "surface-dtx-daemon", "arch": "surface-dtx-daemon"}),
     Component(
         "thermald", "Thermal daemon (thermald)",

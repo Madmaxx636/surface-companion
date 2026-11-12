@@ -54,6 +54,13 @@ class Device:
         return base in models
 
     @property
+    def is_pro_4_or_5(self) -> bool:
+        """Surface Pro 4 and Pro 5. The 2017 Pro 5 reports plain "Surface Pro" as its DMI name; its SKU gives it away."""
+        if self.model_in(("Surface Pro 4", "Surface Pro 5")) or self.model.startswith("Surface Pro (5th Gen)"):
+            return True
+        return self.model == "Surface Pro" and bool(re.search(r"_(1796|1807)$", self.sku))
+
+    @property
     def is_book(self) -> bool:
         return self.family == "book"
 

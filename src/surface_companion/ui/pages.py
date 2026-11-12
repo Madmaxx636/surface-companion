@@ -962,7 +962,9 @@ class FixesPage(Page):
             head = QHBoxLayout()
             head.addWidget(label(f["title"], "h2"), 1)
             applied = f["status"] == "applied"
-            if f["level"] != "advisory":
+            if f["status"] == "conflict":
+                head.addWidget(Pill("Conflicts", "warn"))
+            elif f["level"] != "advisory":
                 head.addWidget(Pill("Applied" if applied else LEVEL[f["level"]][0],
                                     "good" if applied else LEVEL[f["level"]][1]))
             else:
@@ -974,7 +976,7 @@ class FixesPage(Page):
             if f["steps"]:
                 c.add(label(f["steps"]))
             row = QHBoxLayout()
-            if f["applicable"] and not applied:
+            if f["applicable"] and not applied and f["status"] != "conflict":
                 row.addWidget(button("Apply", "primary", lambda fx=f: self.apply(fx)))
             if applied and f["revertable"]:
                 row.addWidget(button("Undo", on_click=lambda fx=f: self.revert(fx)))
@@ -1330,15 +1332,24 @@ class SoftwarePage(Page):
         self.sys_rows.addWidget(Row("Secure Boot", "",
                                     Pill(sb.title(), "good" if sb == "enabled" else "muted")))
         for c in d["components"]:
-            if not c["installable"] and c["reason"] in ("Only for Surface Book",):
+            if not c["installable"] and c["reason"].startswith("Only for Surface Book"):
                 continue
-            if c["installed"]:
+            svc = c.get("services")
+            if c["installed"] and svc and not svc["running"]:
+                ctl = button("Enable services", "primary", lambda cid=c["id"]: self.win.install([cid]))
+            elif c["installed"]:
                 ctl = Pill(f"Installed {c['installed'][:18]}", "good")
             elif c["installable"]:
                 ctl = button("Install", "primary", lambda cid=c["id"]: self.win.install([cid]))
             else:
                 ctl = Pill("Unavailable", "muted")
-            self.comp_rows.addWidget(Row(c["title"], c["why"] if c["installable"] or not c["reason"] else c["reason"], ctl))
+            desc = c["why"] if c["installable"] or not c["reason"] else c["reason"]
+            if svc:
+                st = svc["state"]
+                bits = [f"{u.removesuffix('.service')}: {v}" for u, v in st["system"].items()]
+                bits += [f"{u.removesuffix('.service')} ({user}): {v}" for user, per in st["user"].items() for u, v in per.items()]
+                desc += "\n" + " · ".join(bits)
+            self.comp_rows.addWidget(Row(c["title"], desc, ctl))
         nv = d.get("nvidia") or {}
         if nv.get("present"):
             drv = nv.get("loaded")

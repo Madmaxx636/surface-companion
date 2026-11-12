@@ -238,6 +238,9 @@ def build(settings: Settings) -> dict[str, Action]:
         f = fixes.get(a["id"])
         if f.scope != "system" or not f.apply:
             raise RuntimeError("This fix is not applied by the background service")
+        clash = fixes.conflict_for(f.id, _ctx())
+        if clash:
+            raise RuntimeError(clash)
         f.apply(_ctx(), log)
         return f"{f.title}: done" + (" (restart to finish)" if f.reboot else "")
 
