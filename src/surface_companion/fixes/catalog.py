@@ -263,6 +263,189 @@ def _nowake_revert(ctx: Ctx, log: Log) -> None:
     log("Wake sources return to their defaults after the next reboot.")
 
 
+# ------------------------------------------------------------------ lid wake via surface_gpe (all but Pro 4 / Pro 5)
+
+GPE_LOAD_CONF = "/etc/modules-load.d/50-surface-companion-gpe.conf"
+GPE_UDEV = "/etc/udev/rules.d/50-surface-companion-lid-wake.rules"
+GPE_WAKEUP = "/sys/bus/platform/devices/surface_gpe/power/wakeup"
+GPE_RULE = 'ACTION=="add", SUBSYSTEM=="platform", KERNEL=="surface_gpe", ATTR{power/wakeup}="enabled"\n'
+
+
+def _has_gpe_module() -> bool:
+    return bool(sysfs.run(["modinfo", "-F", "name", "surface_gpe"]).stdout.strip())
+
+
+def _gpe_loaded() -> bool:
+    return bool(re.search(r"^surface_gpe\s", sysfs.read("/proc/modules", "") or "", re.M)) \
+        or sysfs.p("/sys/module/surface_gpe").exists()
+
+
+def _gpe_blacklisted() -> bool:
+    for f in sysfs.glob("/etc/modprobe.d/*.conf") + sysfs.glob("/usr/lib/modprobe.d/*.conf"):
+        for ln in (sysfs.read(f, "") or "").splitlines():
+            ln = ln.strip()
+            if ln.startswith("#"):
+                continue
+            if re.match(r"blacklist\s+surface_gpe\b", ln) or re.match(r"install\s+surface_gpe\s+/bin/(false|true)\b", ln):
+                return True
+    return False
+
+
+def _gpe_wake_detect(ctx: Ctx) -> str:
+    """Applied when surface_gpe is loaded and not blacklisted, whoever arranged that. Not every kernel gives the device
+    a power/wakeup file (the Surface Laptop 3 on linux-surface 7.2 does not); where it exists it must say enabled."""
+    if not _gpe_loaded() or _gpe_blacklisted():
+        return "available"
+    flag = sysfs.read(GPE_WAKEUP)
+    if flag is not None and flag != "enabled":
+        return "available"
+    return "applied"
+
+
+def _gpe_wake_apply(ctx: Ctx, log: Log) -> None:
+    if is_managed(GPE_CONF):
+        raise RuntimeError("Undo “Closing the lid wakes a sleeping device” first: it blacklists surface_gpe, "
+                           "which is the opposite of this fix.")
+    written: list[str] = []
+    try:
+        write_managed(GPE_LOAD_CONF, "surface_gpe\n")
+        written.append(GPE_LOAD_CONF)
+        write_managed(GPE_UDEV, GPE_RULE)
+        written.append(GPE_UDEV)
+        sh(["modprobe", "surface_gpe"], log)
+        if sysfs.p(GPE_WAKEUP).exists():
+            sysfs.write(GPE_WAKEUP, "enabled")
+            log("surface_gpe wakeup enabled")
+        else:
+            log("This kernel gives surface_gpe no power/wakeup setting; having the module loaded is what enables lid wake.")
+    except Exception:
+        for path in written:
+            remove_managed(path)             # leave nothing half-applied
+        raise
+
+
+def _gpe_wake_revert(ctx: Ctx, log: Log) -> None:
+    remove_managed(GPE_LOAD_CONF)
+    remove_managed(GPE_UDEV)
+    log("surface_gpe stays loaded until the next restart; it will no longer be forced to load.")
+
+
+# ------------------------------------------------------------------ Intel PSR
+
+PSR_ARG = "i915.enable_psr=0"
+
+
+def _psr_detect(ctx: Ctx) -> str:
+    return "applied" if bootloader.in_use(PSR_ARG) or bootloader.in_config(PSR_ARG) else "available"
+
+
+def _psr_apply(ctx: Ctx, log: Log) -> None:
+    bootloader.add(PSR_ARG, log)
+
+
+def _psr_revert(ctx: Ctx, log: Log) -> None:
+    bootloader.remove(PSR_ARG, log)
+
+
+# ------------------------------------------------------------------ keyboard wake
+
+KBD_SAM_RULE = "/etc/udev/rules.d/50-surface-companion-kbd-wake.rules"
+KBD_USB_RULE = "/etc/udev/rules.d/50-surface-companion-kbd-wake-usb.rules"
+SAM_LAPTOP_FAMILIES = ("laptop", "laptop-go", "laptop-studio")
+
+
+def _serdev_keyboard() -> str | None:
+    """The serial device the Surface Aggregator hub (and so the keyboard) hangs off, found by its driver."""
+    for d in sysfs.glob("/sys/bus/serial/devices/*"):
+        drv = sysfs.p(d / "driver")
+        if drv.exists() and os.path.basename(os.path.realpath(drv)) == "surface_serial_hub":
+            return d.name
+    return None
+
+
+def _serdev_wakeup(dev: str) -> str:
+    return f"/sys/bus/serial/devices/{dev}/power/wakeup"
+
+
+def _kbd_sam_detect(ctx: Ctx) -> str:
+    dev = _serdev_keyboard()
+    return "applied" if dev and sysfs.read(_serdev_wakeup(dev)) == "enabled" else "available"
+
+
+def _kbd_sam_apply(ctx: Ctx, log: Log) -> None:
+    dev = _serdev_keyboard()
+    if not dev:
+        raise RuntimeError("No Surface Aggregator serial device was found")
+    if not sysfs.p(_serdev_wakeup(dev)).exists():
+        raise RuntimeError(f"{dev} has no power/wakeup setting on this kernel")
+    write_managed(KBD_SAM_RULE, f'ACTION=="add", SUBSYSTEM=="serial", KERNEL=="{dev}", ATTR{{power/wakeup}}="enabled"\n')
+    try:
+        sysfs.write(_serdev_wakeup(dev), "enabled")
+    except OSError:
+        remove_managed(KBD_SAM_RULE)
+        raise
+    log(f"keyboard wake enabled on {dev}")
+
+
+def _kbd_sam_revert(ctx: Ctx, log: Log) -> None:
+    dev = _serdev_keyboard()
+    if not is_managed(KBD_SAM_RULE):
+        if dev and sysfs.read(_serdev_wakeup(dev)) == "enabled":
+            raise RuntimeError("Keyboard wake was turned on by something other than this app (for example a udev "
+                               "rule you wrote). Remove that instead.")
+        return
+    remove_managed(KBD_SAM_RULE)
+    if dev and sysfs.p(_serdev_wakeup(dev)).exists():
+        sysfs.write(_serdev_wakeup(dev), "disabled")
+
+
+def _usb_keyboard() -> dict | None:
+    """A Microsoft USB device that has a HID keyboard interface and is built in (the Surface Book 2 keyboard base)."""
+    for iface in sysfs.glob("/sys/bus/usb/devices/*:*"):
+        if sysfs.read(iface / "bInterfaceClass") != "03" or sysfs.read(iface / "bInterfaceProtocol") != "01":
+            continue
+        dev = iface.name.split(":")[0]
+        base = f"/sys/bus/usb/devices/{dev}"
+        vid = (sysfs.read(f"{base}/idVendor", "") or "").lower()
+        if vid != "045e" or sysfs.read(f"{base}/removable") == "removable":
+            continue
+        if sysfs.p(f"{base}/power/wakeup").exists():
+            return {"dev": dev, "vid": vid, "pid": (sysfs.read(f"{base}/idProduct", "") or "").lower(),
+                    "wake": f"{base}/power/wakeup"}
+    return None
+
+
+def _kbd_usb_detect(ctx: Ctx) -> str:
+    k = _usb_keyboard()
+    return "applied" if k and sysfs.read(k["wake"]) == "enabled" else "available"
+
+
+def _kbd_usb_apply(ctx: Ctx, log: Log) -> None:
+    k = _usb_keyboard()
+    if not k:
+        raise RuntimeError("The keyboard base was not found. Attach the keyboard and try again.")
+    write_managed(KBD_USB_RULE, 'ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", '
+                                f'ATTR{{idVendor}}=="{k["vid"]}", ATTR{{idProduct}}=="{k["pid"]}", ATTR{{power/wakeup}}="enabled"\n')
+    try:
+        sysfs.write(k["wake"], "enabled")
+    except OSError:
+        remove_managed(KBD_USB_RULE)
+        raise
+    log(f"keyboard wake enabled on USB device {k['dev']} ({k['vid']}:{k['pid']})")
+
+
+def _kbd_usb_revert(ctx: Ctx, log: Log) -> None:
+    k = _usb_keyboard()
+    if not is_managed(KBD_USB_RULE):
+        if k and sysfs.read(k["wake"]) == "enabled":
+            raise RuntimeError("Keyboard wake was turned on by something other than this app (for example a udev "
+                               "rule you wrote). Remove that instead.")
+        return
+    remove_managed(KBD_USB_RULE)
+    if k:
+        sysfs.write(k["wake"], "disabled")
+
+
 # ------------------------------------------------------------------ wifi
 
 NM_CONF = "/etc/NetworkManager/conf.d/99-surface-companion.conf"
@@ -436,6 +619,14 @@ def build() -> list[Fix]:
             applies=lambda c: c.dev.model_in(REBOOT_PCI_MODELS) and bootloader.can_manage(),
             detect=lambda c: "applied" if bootloader.in_use("reboot=pci") else "available",
             apply=_pci_apply, revert=_pci_revert, reboot=True),
+        Fix("psr-off", "Screen stays black after waking (Intel PSR)",
+            "Adds i915.enable_psr=0 to the kernel command line, which turns off Intel Panel Self Refresh. It costs a "
+            "little battery. Found by hand-testing on a Surface Laptop 3 (linux-surface 7.2.15); the wiki recommends "
+            "the same setting for other Surface models with different symptoms.",
+            "Graphics", WIKI + "Surface-Laptop-Go", "optional",
+            applies=lambda c: surface(c) and c.dev.cpu_vendor == "intel" and bootloader.can_manage(),
+            detect=_psr_detect, apply=_psr_apply, revert=_psr_revert,
+            recommend=lambda c: c.dev.cpu_vendor == "intel" and c.dev.model_in(("Surface Laptop 3",)), reboot=True),
         Fix("audio-automute", "Hiss from speakers with headphones plugged in",
             "Disables the audio chip's Auto-Mute Mode, which causes hiss on many Surface models.",
             "Audio", WIKI + "Known-Issues-and-FAQ", "optional",
@@ -445,10 +636,39 @@ def build() -> list[Fix]:
             "Blacklists the surface_gpe module. Needed on Surface Pro 4 and 5. Lid events may stop being "
             "reported on other models.",
             "Sleep", WIKI + "Known-Issues-and-FAQ", "optional",
-            applies=lambda c: surface(c) and bool(sysfs.run(["modinfo", "-F", "name", "surface_gpe"]).stdout.strip()),
+            # shown on Pro 4/5; and anywhere it is already applied, so it can still be undone
+            applies=lambda c: surface(c) and _has_gpe_module() and (c.dev.is_pro_4_or_5 or is_managed(GPE_CONF)),
             detect=_file_state(GPE_CONF), apply=_gpe_apply, revert=lambda c, l: remove_managed(GPE_CONF),
-            recommend=lambda c: c.dev.model_in(("Surface Pro 4", "Surface Pro 5", "Surface Pro (5th Gen)")),
-            reboot=True),
+            recommend=lambda c: c.dev.is_pro_4_or_5, reboot=True, conflicts=("gpe-lid-wake",),
+            note=lambda c: "" if c.dev.is_pro_4_or_5 else
+            "This model is not a Surface Pro 4 or 5, so this fix can stop the lid from waking the device. "
+            "Undo it unless you know you need it."),
+        Fix("gpe-lid-wake", "Opening the lid doesn't wake the device",
+            "Makes sure the surface_gpe module is loaded at every boot (and its wakeup flag is on where the kernel "
+            "has one), which is what lets the lid wake a sleeping Surface. Found by hand-testing on a Surface "
+            "Laptop 3 (linux-surface 7.2.15); the wiki only covers the opposite problem on Pro 4 and 5.",
+            "Sleep", WIKI + "Known-Issues-and-FAQ", "optional",
+            applies=lambda c: surface(c) and _has_gpe_module() and not c.dev.is_pro_4_or_5,
+            detect=_gpe_wake_detect, apply=_gpe_wake_apply, revert=_gpe_wake_revert,
+            recommend=lambda c: c.dev.model_in(("Surface Laptop", "Surface Laptop 2", "Surface Laptop 3", "Surface Book 2",
+                                                "Surface Book 3", "Surface Pro 6", "Surface Pro 7")),
+            conflicts=("gpe-lid",)),
+        Fix("kbd-wake-sam", "Keyboard doesn't wake the device",
+            "Lets a key press wake the device by turning on wake-up for the Surface Aggregator serial device the "
+            "built-in keyboard is attached to. Found by hand-testing on a Surface Laptop 3 (linux-surface 7.2.15); "
+            "not documented in the wiki.",
+            "Sleep", WIKI + "Known-Issues-and-FAQ", "optional",
+            applies=lambda c: surface(c) and c.dev.family in SAM_LAPTOP_FAMILIES and _serdev_keyboard() is not None,
+            detect=_kbd_sam_detect, apply=_kbd_sam_apply, revert=_kbd_sam_revert,
+            recommend=lambda c: c.dev.family in SAM_LAPTOP_FAMILIES and not c.dev.model_in(("Surface Laptop", "Surface Laptop 2"))),
+        Fix("kbd-wake-usb", "Keyboard doesn't wake the device (Surface Book keyboard base)",
+            "UNTESTED. Lets a key press wake the device by turning on wake-up for the USB keyboard in the Surface Book's "
+            "base. Written from how the hardware is described, not tried on a Surface Book: only apply it if you are "
+            "happy to undo it.",
+            "Sleep", WIKI + "Surface-Book-2", "optional",
+            applies=lambda c: surface(c) and c.dev.model_in(("Surface Book 2", "Surface Book 3")),
+            detect=_kbd_usb_detect, apply=_kbd_usb_apply, revert=_kbd_usb_revert,
+            note=lambda c: "" if _usb_keyboard() else "The keyboard base wasn't found; attach it before applying."),
         Fix("no-wake", "Device wakes up in a bag",
             "Stops the USB controller and lid from waking the device. Wake it with the power button instead.",
             "Sleep", WIKI + "Known-Issues-and-FAQ", "optional",
@@ -493,6 +713,20 @@ def build() -> list[Fix]:
             applies=lambda c: surface(c) and sysfs.have("tlp") and sysfs.run(["systemctl", "is-active", "tlp"]).stdout.strip() == "active",
             detect=lambda c: "available",
             steps="Disable TLP (sudo systemctl disable --now tlp) and use power-profiles-daemon, or review its config."),
+        Fix("book2-wifi-bluetooth", "Wi-Fi unreliable with Bluetooth on (Surface Book 2)",
+            "The Marvell Wi-Fi card in the Surface Book 2 drops out when Bluetooth is enabled, and it does not support "
+            "WPA3.",
+            "Wi-Fi", WIKI + "Surface-Book-2", "advisory",
+            applies=lambda c: c.dev.model_in(("Surface Book 2",)), detect=lambda c: "available",
+            steps="Turn Bluetooth off when you don't need it, or use a 5 GHz network. Connect with WPA2; WPA3 is not "
+                  "supported by this card."),
+        Fix("book-detach-gpu", "Detaching while the NVIDIA GPU is busy (Surface Book 2 and 3)",
+            "If something is using the discrete GPU when you detach the screen, the GPU and the touchscreen can stop "
+            "working until you restart. Reported from hands-on testing; not in the wiki.",
+            "Graphics", WIKI + "Surface-Book-2", "advisory",
+            applies=lambda c: c.dev.model_in(("Surface Book 2", "Surface Book 3")), detect=lambda c: "available",
+            steps="Before detaching, close anything using the discrete GPU (games, CUDA jobs, video editors). Run "
+                  "nvidia-smi to see what is using it (this wakes the GPU for a moment)."),
         Fix("book3-nvidia", "nvidia-smi cannot talk to the GPU (Surface Book 3)",
             "Usually Secure Boot refusing the unsigned NVIDIA module.",
             "Graphics", WIKI + "Surface-Book-3", "advisory",

@@ -557,3 +557,33 @@ def test_system_test_page_for_a_laptop_has_no_detach_test_and_stress_is_advanced
     w.set_advanced(True)
     assert not page.stress_card.isHidden()
     w.close()
+
+
+def test_fixes_page_shows_conflicts_without_an_apply_button_and_the_software_page_offers_to_enable_dtx(root, monkeypatch):
+    from PyQt6.QtWidgets import QLabel, QPushButton
+    app, w, saved = _win(monkeypatch)
+    page = w.pages["fixes"]
+    fx = {"id": "gpe-lid-wake", "title": "Opening the lid doesn't wake the device", "summary": "s", "category": "c", "source": "u",
+          "level": "recommended", "status": "conflict", "scope": "system", "reboot": False, "revertable": True, "steps": "",
+          "applicable": True, "note": "Conflicts with “Closing the lid wakes a sleeping device”, which is applied. Undo that one first."}
+    page.render([fx])
+    card = page.list.itemAt(0).widget()
+    labels = [lb.text() for lb in card.findChildren(QLabel)]
+    assert "Conflicts" in labels and any("Undo that one first" in t for t in labels)
+    assert [b.text() for b in card.findChildren(QPushButton)] == []                 # no Apply, no Undo
+    fx2 = dict(fx, id="x", status="available", note="")
+    page.render([fx2])
+    assert [b.text() for b in page.list.itemAt(0).widget().findChildren(QPushButton)] == ["Apply"]
+    sw = w.pages["software"]
+    data = {"distro": {"name": "Ubuntu", "family": "debian", "immutable": False},
+            "system": {"kernel": "k", "surface_kernel": True, "repo": True, "secure_boot": "enabled", "tlp": False},
+            "assessment": {"level": "supported", "reasons": []}, "nvidia": {},
+            "components": [{"id": "dtx", "title": "Clipboard detach daemon", "why": "w", "installable": True, "reason": "",
+                            "installed": "0.3.12-1", "reboot": False,
+                            "services": {"running": False, "state": {"system": {"surface-dtx-daemon.service": "active"},
+                                                                     "user": {"lane": {"surface-dtx-userd.service": "inactive"}}}}}]}
+    sw.render(data)
+    texts = [lb.text() for lb in sw.comp_rows.parentWidget().findChildren(QLabel)]
+    assert any("surface-dtx-userd (lane): inactive" in t for t in texts)
+    assert "Enable services" in [b.text() for b in sw.comp_rows.parentWidget().findChildren(QPushButton)]
+    w.close()

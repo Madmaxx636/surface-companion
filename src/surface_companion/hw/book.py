@@ -40,6 +40,7 @@ def dgpu() -> dict | None:
             drv = d / "driver"
             return {
                 "address": d.name,
+                "device_id": sysfs.read_int(d / "device"),        # PCI device id, e.g. 0x1c8d (Pascal) or 0x2191 (Turing)
                 "driver": os.path.basename(os.path.realpath(sysfs.p(drv))) if sysfs.p(drv).exists() else None,
                 "power_state": sysfs.read(d / "power_state"),
                 "runtime_status": sysfs.read(d / "power/runtime_status"),

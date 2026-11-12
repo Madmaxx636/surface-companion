@@ -38,6 +38,7 @@ class Fix:
     steps: str = ""                              # advisory text / manual steps
     recommend: Callable[[Ctx], bool] | None = None   # promote optional -> recommended when true
     note: Callable[[Ctx], str] | None = None         # extra, situation-specific line shown with the fix
+    conflicts: tuple[str, ...] = ()                  # ids of fixes that cannot be applied together with this one
 
 
 def is_managed(path: str) -> bool:
